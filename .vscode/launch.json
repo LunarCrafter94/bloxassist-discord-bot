@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Credit Bot - Python 3.15",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/RunBot.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/private-configs/tokens.env",
+      "justMyCode": true
+    }
+  ]
+}

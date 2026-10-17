@@ -1,0 +1,44 @@
+# Secrets and local environment files
+.env
+.env.*
+*.env
+*.env.*
+private-configs/tokens.env
+!.env.example
+!private-configs/tokens.env.example
+
+# Python bytecode and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+.venv-*/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Runtime databases and SQLite sidecar files
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+data/
+
+# Local backups, editable notes and logs
+_backups/
+_notes/
+*.log
+
+# Local secret/key files
+*.pem
+*.key
+secrets/
+
+# OS/tool files
+.DS_Store
+Thumbs.db

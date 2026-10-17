@@ -1,0 +1,6 @@
+{
+  "python-envs.defaultEnvManager": "ms-python.python:system",
+  "python.terminal.useEnvFile": true,
+  "python.envFile": "${workspaceFolder}/private-configs/tokens.env",
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe"
+}
