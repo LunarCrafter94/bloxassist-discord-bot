@@ -1,47 +1,31 @@
-# Phase 2 — Credit transaction safety
+# Credit transaction safety
 
-## Main rule
+## Core rule
 
-Every operation that changes a balance and its corresponding financial history must commit as one SQLite transaction. If any statement fails, roll back the entire operation.
+A balance change and its corresponding ticket/account state change and ledger record must commit in the same SQLite transaction. If a required statement fails, the operation should roll back as a whole.
 
-## Ticket lifecycle
+## Ticket operations
 
-- `ReserveTicket` obtains a write lock with `BEGIN IMMEDIATE` before reading balances or allocating ticket numbers. It creates any missing accounts, writes initial-balance ledger entries, deducts the price, creates the ticket, allocates its guild-local ticket number, and records `ticket_reservation` in one transaction.
-- `CompleteTicket` obtains a write lock, transitions only an open ticket, credits each helper, writes each `ticket_reward` row, records any unused-helper-slot refund, and commits once. A ticket status transition, helper rewards, and any unused-slot refund cannot be partially committed.
-- `RefundTicket` obtains a write lock, transitions only an open ticket, restores the reservation, writes a `refund` row, and commits once.
-- A failure in any of those operations rolls back all database writes made by that operation.
+- **Reservation:** a write transaction obtains a lock with `BEGIN IMMEDIATE`, initializes a missing account when needed, records starting credits, deducts the reservation, creates the ticket, allocates the server-local ticket number, and writes the reservation ledger entry.
+- **Completion:** the operation transitions only an eligible open ticket, credits the active helpers, records payouts, and returns the value of any unused original helper slot when applicable. These writes commit together.
+- **Refund:** the operation transitions only an eligible open ticket, returns the reserved credits, and records the refund together.
+- **Manual adjustment:** additions/deductions record the amount, actor, optional reason, and idempotency key with the balance change. Invalid amounts and deductions that would create a negative balance are rejected.
 
-## Database-level safeguards
+## Database-level protections
 
-The schema includes partial unique indexes so that:
-
-- no two currently open tickets share the same ticket number in one guild database;
-- a ticket cannot have duplicate `ticket_reservation` or `refund` entries;
-- a ticket cannot have two `ticket_reward` entries for the same helper;
-- one idempotency key cannot be applied more than once.
-
-Closed ticket numbers may be reused after all tickets are closed, so the open-ticket-number index is intentionally partial.
-
-## Auditing and idempotency
-
-Transaction records contain amount, type, actor user ID when known, a note when supplied, and an optional idempotency key. The database-level `ApplyCreditAdjustment` method supports `direction="add"` or `direction="deduct"`. It rejects invalid amounts, refuses deductions that would create a negative balance, records the adjustment in the same transaction as the balance change, and recognizes a repeated idempotency key. A repeated identical request returns `duplicate`; the same key used for different transaction details returns `idempotency_conflict`.
-
-The API is foundation for future `/add` and `/deduct` slash commands, but those commands are not part of Phase 2.
+Partial unique indexes and idempotency safeguards defend against duplicate reservation/refund ledger entries, multiple rewards for the same helper on a ticket, duplicate open ticket numbers within a server, and repeated idempotency keys. A repeated identical adjustment is not applied twice; reusing a key for different details is rejected.
 
 ## Per-helper service pricing
 
-New tickets snapshot `price_per_helper` and reserve `price_per_helper × selected helper count` in `required_credits`/`reserved_credits`. Service catalog edits do not modify an existing ticket snapshot. If helper replacements fill the original slots, each active helper receives the saved unit price. If slots remain unfilled at completion, the unused portion is returned to the requester in the same transaction as payouts. Legacy tickets with a NULL `price_per_helper` keep their prior total-price/equal-split behavior. Cancellation still refunds the full reservation.
+New tickets store the configured unit price and the total reservation (`unit price × selected helpers`). Editing the service catalog does not rewrite existing ticket snapshots. Each active helper receives the saved unit rate at completion; a vacant original slot is refunded if no approved replacement fills it. Cancellation refunds the full reservation. Legacy tickets without a unit price snapshot keep their older fixed-total/equal-split behavior.
 
-## Starting credits
+## Starting credits and history
 
-When a member account is first created, the initial balance is recorded as a `starting_balance` ledger entry in the same database transaction. Existing historical accounts are not assigned artificial starting-balance entries during migration because their true historical grant details may be unknown.
+A new member account's starting-credit grant is recorded as a `starting_balance` ledger entry. The migration does not create invented starting-credit ledger records for older accounts whose original grant details are unknown.
 
-## Testing
+## Operational safety
 
-The test suite verifies per-guild isolation, numbered ticket allocation, schema migration, once-only reservation/completion/refund, atomic and audited balance adjustments, duplicate idempotency behavior, simultaneous reservations, simultaneous completion attempts, and rollback after intentionally injected database errors.
-
-## Operational cautions
-
-- Stop the bot before copying SQLite databases for a manual backup. Preserve the `.sqlite3`, `-wal`, and `-shm` files together if they exist.
-- Test using the development bot and controlled test accounts before using real credit balances.
-- SQLite database files are private runtime data and must not be committed to GitHub.
+- Stop the bot and close SQLite viewers before a manual file-copy backup or restore.
+- Keep the `.sqlite3` main file together with any `-wal`, `-shm`, and journal sidecars.
+- Run tests in the development virtual environment and use a development Discord server before testing financial operations live.
+- Never commit databases or real balance/transaction data to GitHub.

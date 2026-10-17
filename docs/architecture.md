@@ -1,35 +1,35 @@
 # Architecture and server identity
 
-## Guild ID source
+## Server ID and database routing
 
-Discord supplies `interaction.guild_id` for interactions in a server. Guild events expose `guild.id`; member events expose `member.guild.id`. The bot does not need the invoking user to have permission to copy the ID in Discord's UI.
+Discord interactions carry the server (guild) ID. The bot uses the ID from the current interaction or event to select the matching server database; `GUILD_ID` in `private-configs/tokens.env` controls slash-command synchronization scope only and must not be used to route database operations.
 
-## Database initialization points
+The current database path is:
 
-- `/setup public_tickets`: call `DatabaseManager.ForServer(interaction.guild_id)` before creating/updating the public Help Center panel; save its channel and message IDs.
-- `/setup admin_dashboard`: resolves the current guild database, posts/updates the dashboard in the invoking text channel, and saves dashboard channel/message IDs. It does not create a channel.
-- Dashboard forms write configurable values into that guild's `settings` and `services` tables; missing Phase 3 keys are seeded with `INSERT OR IGNORE` so existing saved values are preserved.
-- `on_guild_join`: initializes a guild database when the bot joins a server.
-- `on_member_join`: resolves the member's server database and uses that database's configured starting credits.
-- Balance and ticket interactions: resolve storage using the actual interaction guild ID.
+```text
+data/servers/<server_id>/blox_fruits_credit_system.sqlite3
+```
 
-## Isolation boundary
+Each database stores that server's accounts, balances, ticket records, services, settings, ticket number sequence, and transaction ledger. SQLite WAL/SHM sidecars, when present, sit alongside the main database file.
 
-Each `GuildDatabase` represents one Discord server and is backed by `data/servers/<server_id>/blox_fruits_credit_system.sqlite3`. The class keeps its internal Discord API terminology, while the on-disk layout uses the clearer server-based name. SQLite's WAL/SHM sidecars remain beside that main file. Persistent views retain the `DatabaseManager`, not a database connection for one server, then route each callback through the current interaction's guild ID.
+## Initialization points
+
+- `/setup public_tickets` initializes or resolves the current server database before posting/updating the public Help Center panel.
+- `/setup admin_dashboard` resolves the same server database, then posts or updates the dashboard in the channel where the command is invoked; it does not create a separate dashboard channel.
+- Dashboard controls write to the current server's settings and service catalog.
+- Guild-join and member-join events initialize server/account data as implemented by the current source.
+- Balance and ticket callbacks resolve the database from the interaction's actual server ID.
 
 ## Ticket numbering
 
-Each guild's database stores `ticket_number` and the next number in its own `settings` table. Allocation occurs inside the ticket reservation write transaction, so requests handled by the same guild database cannot receive the same number. The number advances while at least one ticket has `status = 'open'`. When the open-ticket count becomes zero, the next reservation starts at 1 again, formatted in channel names with a minimum width of three digits (`ticket-001`). Closed ticket records remain in the database for history; their old numbers may therefore appear on historical records after the channel name is reused in a later cycle.
+The next ticket number is allocated inside the ticket reservation write transaction. Numbers are isolated per server and cannot duplicate among currently open tickets in the same server. When a server has no open tickets, the next ticket starts again at `ticket-001`; closed records remain available for history, so a reused number may appear in a later record cycle.
 
-## Slash-command sync
+## Dashboard and ticket permissions
 
-`GUILD_ID` in `private-configs/tokens.env` controls command synchronization scope only. It does not determine database routing.
+Dashboard callback authorization is checked in code. Administrators and configured moderator roles may use permitted dashboard controls; only Administrators can edit the moderator-role allowlist. The dashboard does not change its host channel's visibility, so it should be posted in a staff-only channel when its settings must remain private.
 
+The configured ticket staff baseline role and normal, non-managed roles above it in the role hierarchy receive ticket access according to the bot's permission logic. The bot does not grant Administrator. Discord's channel permission overwrite endpoint requires `Manage Roles`; `Manage Channels` alone is insufficient.
 
-## Dashboard security and channel permissions
+## Database migration
 
-Dashboard callbacks verify that the user is a server Administrator or holds a configured moderator role; the Moderator Roles setting itself is Administrator-only. The dashboard does not rewrite channel visibility. Use a staff-only channel for confidentiality; configured roles and Administrators are authorized to operate dashboard controls by callback checks. A configured ticket staff baseline role applies `View Channel`, `Send Messages`, and `Read Message History` to that role and higher, non-managed roles. No permission overwrite grants Administrator.
-
-## Database file migration
-
-The database manager now treats the project-level `data/` as its root. Current storage uses `data/servers/<server_id>/blox_fruits_credit_system.sqlite3`. If the older `data/guilds/<server_id>/guild.sqlite3` is found and the new path is absent, it archives the legacy directory and copies the database through SQLite's backup API into the new file. It validates the copy with `PRAGMA integrity_check`. If the new file already exists alongside the legacy file, it stops instead of choosing a potentially stale database.
+When the older `data/guilds/<server_id>/guild.sqlite3` exists and the current path does not, the application copies the old database through SQLite's backup API, verifies integrity, and retains the legacy copy under `data/legacy-database-archives/`. If both old and current files exist, startup stops rather than picking one. Always make a full backup before migrations and verify balances, tickets, settings, and ledger history afterward.
