@@ -34,7 +34,7 @@ class PerServerBackupService:
 
     async def HourlyLoop(self, bot: discord.Client) -> None:
         await bot.wait_until_ready()
-        # Startup snapshot, then once per hour. Do not overlap prior runs.
+        # Startup snapshot, then every five hours. Do not overlap prior runs.
         while not bot.is_closed():
             try:
                 await self.BackupAllServers(bot)
@@ -42,7 +42,7 @@ class PerServerBackupService:
                 raise
             except Exception:
                 logger.exception("Per-server backup cycle failed")
-            await asyncio.sleep(3600)
+            await asyncio.sleep(5 * 60 * 60)
 
     async def BackupAllServers(self, bot: discord.Client) -> int:
         if not self.enabled:
