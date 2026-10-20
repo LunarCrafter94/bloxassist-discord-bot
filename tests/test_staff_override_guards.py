@@ -28,19 +28,22 @@ class StaffOverrideGuardTests(unittest.TestCase):
         self.assertNotIn("isModerator", cancel_body)
         self.assertNotIn("moderator override cancellation/refund", cancel_body)
         self.assertIn("interaction.user.id != int(ticket[\"creator_id\"])", cancel_body)
+        self.assertIn("interaction.user.id not in activeHelperIds", cancel_body)
+        self.assertIn("Only the requester or an active assigned helper can propose cancellation", cancel_body)
 
     def test_ticket_override_paths_reject_ticket_participants(self):
         ticket_text = (SOURCE / "tickets" / "ticket_views.py").read_text(encoding="utf-8")
         complete_body = ticket_text.split("async def CompleteCurrentTicket", 1)[1].split("async def CancelUserTicket", 1)[0]
         refund_body = ticket_text.split("async def RefundCurrentTicket", 1)[1].split("def BuildHelpCenterEmbed", 1)[0]
         self.assertIn("IsUserTicketParticipant", complete_body)
+        self.assertIn("interaction.user.id not in activeHelperIds", complete_body)
         self.assertIn("IsUserTicketParticipant", refund_body)
 
 
     def test_add_and_deduct_are_server_owner_only(self):
         bot_text = (SOURCE / "bot_client.py").read_text(encoding="utf-8")
         add_body = bot_text.split("async def AddCredits", 1)[1].split("@bot.tree.command(name=\"deduct\"", 1)[0]
-        deduct_body = bot_text.split("async def DeductCredits", 1)[1].split("replacementAdminGroup =", 1)[0]
+        deduct_body = bot_text.split("async def DeductCredits", 1)[1].split("inviteEventGroup =", 1)[0]
         for body, commandName in ((add_body, "/add"), (deduct_body, "/deduct")):
             self.assertIn("IsServerOwner(interaction)", body, commandName)
             self.assertNotIn("HasConfiguredStaffAccess(interaction", body, commandName)

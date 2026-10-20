@@ -46,7 +46,7 @@ function Copy-TreeSafely([string]$RelativePath) {
         $relativeFile = $file.FullName.Substring($ProjectRoot.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
         # Do not exclude a nested directory named 'data' under tests; it may contain fixtures.
         if ($relativeFile -match '(^|[\\/])__pycache__([\\/]|$)') { continue }
-        if ($file.Name -match '^(?i:tokens\.env)$') { continue }
+        if ($file.Name -match '^(?i:(?:tokens|runtime|credentials)\.env)$') { continue }
         if ($file.Name -match '^(?i:\.env(?:\..*)?)$' -and $file.Name -notmatch '^(?i:\.env\.example)$') { continue }
         if ($file.Name -match '^(?i:.*\.(db|sqlite|sqlite3)(-wal|-shm|-journal)?)$') { continue }
         if ($file.Extension -in @('.pyc', '.pyo', '.log')) { continue }
@@ -61,13 +61,13 @@ function Copy-TreeSafely([string]$RelativePath) {
 foreach ($relativePath in @('source-files', 'tests', 'tools', 'docs', 'assets', '.vscode')) {
     Copy-TreeSafely -RelativePath $relativePath
 }
-foreach ($fileName in @('RunBot.py', '.gitignore', 'README.md', 'CHANGELOG.md', 'INSTALL.md', 'requirements.txt', 'pyproject.toml')) {
+foreach ($fileName in @('RunBot.py', '.gitignore', 'README.md', 'requirements.txt', 'pyproject.toml')) {
     $source = Join-Path $ProjectRoot $fileName
     if (Test-Path -LiteralPath $source -PathType Leaf) {
         Copy-Item -LiteralPath $source -Destination (Join-Path $sourceRoot $fileName)
     }
 }
-$examplePath = Join-Path $ProjectRoot 'private-configs\tokens.env.example'
+$examplePath = Join-Path $ProjectRoot 'private-configs\credentials.env.example'
 if (Test-Path -LiteralPath $examplePath -PathType Leaf) {
     $privateTemplateDirectory = Join-Path $sourceRoot 'private-configs'
     New-Item -ItemType Directory -Force -Path $privateTemplateDirectory | Out-Null

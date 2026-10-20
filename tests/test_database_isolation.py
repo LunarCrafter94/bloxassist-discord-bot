@@ -115,7 +115,7 @@ class PerGuildDatabaseTests(unittest.TestCase):
         self.assertIsNone(secondAmount)
         self.assertEqual(self.guildA.GetBalance(requesterId), 250)
 
-    def testTicketNumbersIncreaseUntilAllTicketsCloseThenReset(self):
+    def testTicketNumbersIncreaseAcrossEmptyQueueWithoutReset(self):
         def createTicket(channelId, creatorId):
             self.guildA.CreateUser(creatorId, 500)
             ticketId = self.guildA.ReserveTicket(
@@ -141,15 +141,14 @@ class PerGuildDatabaseTests(unittest.TestCase):
         thirdTicketId, thirdNumber = createTicket(8103, 6103)
         self.assertEqual(thirdNumber, 3)
 
-        # Historical closed tickets remain in the database, but when the open
-        # ticket count reaches zero, the next ticket starts over at 001.
+        # Ticket numbering must not reset merely because every open ticket closes.
         self.assertEqual(self.guildA.RefundTicket(secondTicketId), ("refunded", 10))
         self.assertEqual(self.guildA.RefundTicket(thirdTicketId), ("refunded", 10))
-        _, resetNumber = createTicket(8104, 6104)
-        self.assertEqual(resetNumber, 1)
+        _, nextNumber = createTicket(8104, 6104)
+        self.assertEqual(nextNumber, 4)
 
-        # The sequence is guild-local, so another server starts with 001 even while
-        # this server has an open ticket numbered 001.
+        # The sequence is guild-local, so another server starts at 1-001 even while
+        # this server has a newer ticket number.
         self.guildB.CreateUser(6201, 500)
         otherGuildTicketId = self.guildB.ReserveTicket(
             channelId=8201,
@@ -161,6 +160,197 @@ class PerGuildDatabaseTests(unittest.TestCase):
         self.assertIsNotNone(otherGuildTicketId)
         otherGuildTicket = self.guildB.GetTicketById(otherGuildTicketId)
         self.assertEqual(int(otherGuildTicket["ticket_number"]), 1)
+
+    def testChannelNumbersResetWhenNoTicketsRemainButTranscriptSequenceContinues(self):
+        def createTicket(channelId, creatorId):
+            ticketId = self.guildA.ReserveTicket(
+                channelId=channelId, creatorId=creatorId, eventKey="channel_cycle_test",
+                helperIds=[creatorId + 10000], requiredCredits=0,
+            )
+            self.assertIsNotNone(ticketId)
+            return ticketId, self.guildA.GetTicketById(ticketId)
+
+        firstId, first = createTicket(8301, 6301)
+        self.assertEqual(int(first["channel_ticket_number"]), 1)
+        self.assertEqual(int(first["ticket_sequence"]), 1)
+
+        # With an open ticket still present, labels move forward and do not collide.
+        secondId, second = createTicket(8302, 6302)
+        self.assertEqual(int(second["channel_ticket_number"]), 2)
+        self.assertEqual(int(second["ticket_sequence"]), 2)
+
+        self.assertEqual(self.guildA.RefundTicket(firstId), ("refunded", 0))
+        thirdId, third = createTicket(8303, 6303)
+        self.assertEqual(int(third["channel_ticket_number"]), 3)
+        self.assertEqual(int(third["ticket_sequence"]), 3)
+
+        # Once every active ticket is closed, the channel number can return to 001,
+        # but the permanent transcript sequence continues and stays unique.
+        self.assertEqual(self.guildA.RefundTicket(secondId), ("refunded", 0))
+        self.assertEqual(self.guildA.RefundTicket(thirdId), ("refunded", 0))
+        fourthId, fourth = createTicket(8304, 6304)
+        self.assertEqual(int(fourth["channel_ticket_number"]), 1)
+        self.assertEqual(int(fourth["ticket_number"]), 4)
+        self.assertEqual(int(fourth["ticket_sequence"]), 4)
+
+        from bloxfruits_helper_credit_bot.ticket_numbers import TicketChannelLabelFromRow, TicketLabelFromRow
+        self.assertEqual(TicketChannelLabelFromRow(fourth), "001")
+        self.assertEqual(TicketLabelFromRow(fourth), "004")
+
+    def testActiveChannelNumbersCannotBeReused(self):
+        ids = []
+        channelNumbers = []
+        for index in range(3):
+            ticketId = self.guildA.ReserveTicket(
+                channelId=8401 + index, creatorId=6401 + index, eventKey="active_channel_test",
+                helperIds=[16401 + index], requiredCredits=0,
+            )
+            self.assertIsNotNone(ticketId)
+            ticket = self.guildA.GetTicketById(ticketId)
+            ids.append(ticketId)
+            channelNumbers.append(int(ticket["channel_ticket_number"]))
+        self.assertEqual(channelNumbers, [1, 2, 3])
+        self.assertEqual(len(set(channelNumbers)), 3)
+        for ticketId in ids:
+            self.assertEqual(self.guildA.RefundTicket(ticketId)[0], "refunded")
+
+    def testTicketNumberDoesNotWrapAfter100EvenWithNoOpenTickets(self):
+        numbers = []
+        for index in range(101):
+            requesterId = 930000 + index
+            ticketId = self.guildA.ReserveTicket(
+                channelId=940000 + index, creatorId=requesterId, eventKey="cycle_test",
+                helperIds=[950000 + index], requiredCredits=0,
+            )
+            self.assertIsNotNone(ticketId)
+            ticket = self.guildA.GetTicketById(ticketId)
+            numbers.append(int(ticket["ticket_number"]))
+            self.assertEqual(int(ticket["ticket_sequence"]), index + 1)
+            status, amount = self.guildA.RefundTicket(ticketId)
+            self.assertEqual((status, amount), ("refunded", 0))
+        self.assertEqual(numbers[:3], [1, 2, 3])
+        self.assertEqual(numbers[98:101], [99, 100, 101])
+        from bloxfruits_helper_credit_bot.ticket_numbers import TicketLabelFromRow
+        firstHundredth = self.guildA.GetTicketById(100)
+        hundredFirst = self.guildA.GetTicketById(101)
+        self.assertEqual(TicketLabelFromRow(firstHundredth), "100")
+        self.assertEqual(TicketLabelFromRow(hundredFirst), "101")
+        self.assertEqual(self.guildA.GetSetting("next_ticket_sequence"), "102")
+
+        # A process restart must not reset the counter.
+        dataDir = self.databaseManager.dataDir
+        self.databaseManager.CloseAll()
+        self.databaseManager = DatabaseManager(
+            dataDir,
+            defaultJoinCredits=DEFAULT_JOIN_CREDITS,
+            defaultServices=DEFAULT_SERVICES,
+        )
+        self.guildA = self.databaseManager.ForServer(111111111111111111)
+        nextTicketId = self.guildA.ReserveTicket(
+            channelId=990999,
+            creatorId=990998,
+            eventKey="cycle_test",
+            helperIds=[990997],
+            requiredCredits=0,
+        )
+        self.assertIsNotNone(nextTicketId)
+        nextTicket = self.guildA.GetTicketById(nextTicketId)
+        self.assertEqual(int(nextTicket["ticket_number"]), 102)
+        self.assertEqual(TicketLabelFromRow(nextTicket), "102")
+
+    def testLegacyCycledTicketLabelsArePreservedAndCounterContinuesAfterUpgrade(self):
+        # Build a small data set, then emulate v0.7.0's wrapped labels and settings.
+        legacyTicketIds = []
+        for index in range(3):
+            ticketId = self.guildA.ReserveTicket(
+                channelId=970001 + index,
+                creatorId=970101 + index,
+                eventKey="legacy_cycle",
+                helperIds=[970201 + index],
+                requiredCredits=0,
+            )
+            self.assertIsNotNone(ticketId)
+            legacyTicketIds.append(ticketId)
+            self.assertEqual(self.guildA.RefundTicket(ticketId), ("refunded", 0))
+
+        for ticketId, oldNumber in zip(legacyTicketIds, (1, 2, 1)):
+            self.guildA.Execute(
+                "UPDATE tickets SET ticket_number = ?, ticket_sequence = NULL WHERE ticket_id = ?",
+                (oldNumber, ticketId),
+            )
+        self.guildA.Execute("DELETE FROM settings WHERE setting_key = 'next_ticket_sequence'")
+        self.guildA.Execute(
+            "INSERT INTO settings(setting_key, setting_value) VALUES ('next_ticket_number', '2')"
+        )
+
+        dataDir = self.databaseManager.dataDir
+        self.databaseManager.CloseAll()
+        self.databaseManager = DatabaseManager(
+            dataDir,
+            defaultJoinCredits=DEFAULT_JOIN_CREDITS,
+            defaultServices=DEFAULT_SERVICES,
+        )
+        self.guildA = self.databaseManager.ForServer(111111111111111111)
+
+        from bloxfruits_helper_credit_bot.ticket_numbers import TicketLabelFromRow
+        legacyLabels = [TicketLabelFromRow(self.guildA.GetTicketById(ticketId)) for ticketId in legacyTicketIds]
+        self.assertEqual(legacyLabels, ["001", "002", "001"])
+        self.assertEqual(self.guildA.GetSetting("next_ticket_sequence"), "4")
+        ticketColumns = {
+            str(row["name"])
+            for row in self.guildA.Execute("PRAGMA table_info(tickets)", fetchAll=True)
+        }
+        self.assertIn("transcript_saved", ticketColumns)
+
+        newTicketId = self.guildA.ReserveTicket(
+            channelId=970009,
+            creatorId=970109,
+            eventKey="after_upgrade",
+            helperIds=[970209],
+            requiredCredits=0,
+        )
+        self.assertIsNotNone(newTicketId)
+        newTicket = self.guildA.GetTicketById(newTicketId)
+        self.assertEqual(TicketLabelFromRow(newTicket), "004")
+
+    def testInviteRewardEventsAreTimedAndAwardInviterOnce(self):
+        status, eventId, endsAt = self.guildA.StartInviteEvent(75, 60, startedBy=1234)
+        self.assertEqual(status, "started")
+        self.assertIsNotNone(eventId)
+        self.assertTrue(endsAt)
+        self.assertEqual(self.guildA.StartInviteEvent(50, 60, startedBy=5678)[0], "already_active")
+
+        first = self.guildA.AwardInviteReward(eventId, invitedUserId=22001, inviterUserId=22002, inviteCode="abc123")
+        self.assertEqual(first[0], "awarded")
+        self.assertEqual(first[1], 175)
+        self.assertEqual(first[2], 75)
+        second = self.guildA.AwardInviteReward(eventId, invitedUserId=22001, inviterUserId=22002, inviteCode="abc123")
+        self.assertEqual(second[0], "duplicate")
+        self.assertEqual(self.guildA.GetBalance(22002), 175)
+
+        endedStatus, event = self.guildA.EndInviteEvent(endedBy=1234)
+        self.assertEqual(endedStatus, "ended")
+        self.assertEqual(int(event["event_id"]), eventId)
+        self.assertIsNone(self.guildA.GetActiveInviteEvent())
+
+    def testScamReportsAndTicketHistoryAreStoredPerServer(self):
+        ticketId = self.guildA.ReserveTicket(
+            channelId=960001, creatorId=960002, eventKey="history_event",
+            helperIds=[960003], requiredCredits=0,
+        )
+        self.assertIsNotNone(ticketId)
+        rows = self.guildA.ListTicketHistoryForMember(960003, limit=5)
+        self.assertEqual([int(row["ticket_id"]) for row in rows], [ticketId])
+        reportId = self.guildA.CreateScamReport(960002, 960003, "The helper did not provide the promised service.")
+        report = self.guildA.Execute("SELECT * FROM scam_reports WHERE report_id = ?", (reportId,), fetchOne=True)
+        self.assertEqual(report["reporter_user_id"], 960002)
+        self.assertEqual(report["reported_user_id"], 960003)
+        openReports = self.guildA.ListScamReports(status="open", limit=5)
+        self.assertEqual([int(row["report_id"]) for row in openReports], [reportId])
+        self.assertTrue(self.guildA.ResolveScamReport(reportId, reviewedBy=960004, decision="confirmed", note="Transcript reviewed"))
+        self.assertFalse(self.guildA.ResolveScamReport(reportId, reviewedBy=960004, decision="dismissed", note="duplicate review"))
+        reviewed = self.guildA.Execute("SELECT status, reviewed_by, review_note FROM scam_reports WHERE report_id = ?", (reportId,), fetchOne=True)
+        self.assertEqual((reviewed["status"], reviewed["reviewed_by"], reviewed["review_note"]), ("confirmed", 960004, "Transcript reviewed"))
 
     def testCreditAdjustmentIsAtomicAndAudited(self):
         userId = 7101
@@ -512,6 +702,9 @@ class PerGuildDatabaseTests(unittest.TestCase):
                 )
             }
             self.assertIn("ticket_number", ticketColumns)
+            self.assertIn("ticket_sequence", ticketColumns)
+            self.assertIn("channel_ticket_number", ticketColumns)
+            self.assertIn("transcript_saved", ticketColumns)
             self.assertIn("actor_user_id", transactionColumns)
             self.assertIn("note", transactionColumns)
             self.assertIn("idempotency_key", transactionColumns)

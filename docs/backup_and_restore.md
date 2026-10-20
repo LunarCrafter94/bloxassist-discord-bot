@@ -1,24 +1,52 @@
 # Backup and restore
 
-Use the one current backup script, `tools/Backup-Project.ps1`, for routine pre-update checkpoints. The old phase-specific backup scripts are historical copies of similar procedures and should not all be used interchangeably.
+## Automated per-server ZIP-to-DM backups
 
-## Create a checkpoint
+The optional `PerServerBackupService` uses these environment variables:
 
-1. Stop the bot using `Ctrl+C`.
-2. Close DB Browser for SQLite and any other process using the databases.
-3. From the project root, run:
+- `BACKUP_DISCORD_USER_ID`: numeric Discord ID to receive backups.
+- `BACKUP_ENCRYPTION_PASSWORD`: long random password used for WinZip AES-256 encryption.
 
-   ```powershell
-   .\tools\Backup-Project.ps1 -ProjectRoot "D:\Repositories\Local\bloxfruits-helper-credit-bot"
-   ```
+When both are configured, the service snapshots every connected Discord server separately after the bot becomes ready and repeats hourly. It also attempts one final backup during graceful shutdown. It intentionally does **not** ZIP all of `data/` into one archive: each DM contains one server only, named with that server's ID.
 
-4. Type `YES` only when the bot and database tools are closed.
-5. Review the printed `_backups` path. Confirm the source, tests, tools, docs, and `data` folders were included as applicable. The script's SHA-256 manifest inventories copied files; it does not validate business rules or replace a restore test.
+SQLite backups use `sqlite3.Connection.backup()` under the database lock (including committed WAL state), then run `PRAGMA integrity_check`. PostgreSQL backups use a separate read-only repeatable-read connection and export the isolated `server_<server_id>` schema tables/columns/rows. The raw connection URL, bot token, and backup password are not written into the ZIP.
 
-The backup script must exclude the real `private-configs/tokens.env` and other secret environment files. Backups include the SQLite data and may contain member balances and ticket history; keep them local and private, and don't upload them to GitHub.
+The service uses a conservative 8 MB Discord attachment threshold. Larger archives are skipped and logged; the bot doesn't claim success. DMs must be available to the bot. Hourly delivery and graceful-shutdown delivery are best-effort: a hard kill, host deadline, API outage, inaccessible DM, or upload-size limit may prevent delivery. The configured Audit Log Channel also receives startup and graceful-shutdown status notices; it cannot report a forced kill that prevents the bot from running its shutdown handler. Keep the archive password separate from the ZIP, because a lost password makes AES-protected backups unreadable.
 
-## Restore
+## Restore a SQLite backup
 
-Stop the bot and close all database viewers first. Restore source and the matching data snapshot together. Keep the real token file separate. After restoring, run `tools/Test-Project.ps1`, start the bot in the development server, and verify balances, ticket state, and transaction history before returning to production.
+1. Stop the bot.
+2. Download the server-specific ZIP and extract it with the backup password. Check `manifest.json` and `server_id` before using it.
+3. Keep a separate copy of the current database directory in case the wrong archive was selected.
+4. Restore `database/blox_fruits_credit_system.sqlite3` to `data/servers/<server_id>/blox_fruits_credit_system.sqlite3`.
+5. If there are multiple sidecar files in a separate source snapshot, keep them with the corresponding database or use the consistent SQLite backup from the ZIP as the replacement.
+6. Start in a test deployment first; verify member balances, service settings, tickets, and transaction rows.
 
-Do not delete a legacy database archive just because the new path exists. Confirm the current database has the expected records and make a fresh backup first.
+## Inspect or restore a PostgreSQL ZIP backup
+
+A PostgreSQL ZIP contains `database/database-export.json` and `manifest.json`. First run the restore utility in dry-run mode:
+
+```powershell
+.\.venv\Scripts\python.exe tools\Restore-Postgres-Server-Backup.py path\to\server-<ID>-backup.zip --server-id <ID>
+```
+
+To apply, stop the bot and run the same command with `--apply`. The script requires typing the exact server ID because it replaces the eight application tables for that server. It checks the backup format/server ID, checks schema column compatibility, imports rows transactionally, resets serial sequences, and verifies row counts. Confirm balances, tickets, service settings, event history and ledger before starting the bot again.
+
+## One-time SQLite-to-PostgreSQL migration
+
+With the bot stopped and local SQLite source databases at `data/servers/<server_id>/blox_fruits_credit_system.sqlite3`, configure `DATABASE_BACKEND=postgresql` and `DATABASE_URL`, then run:
+
+```powershell
+.\.venv\Scripts\python.exe tools\Migrate-SQLite-To-Postgres.py
+```
+
+It discovers server IDs in current or legacy local paths, updates legacy SQLite schemas using the project's migrator, confirms the target PostgreSQL schema contains only the known default seeds, and refuses to overwrite any populated/modified target. Type `MIGRATE` only after confirming the source files are recoverable. Inspect row counts and balances after migration.
+
+## Local pre-update backup
+
+Use `tools/Backup-Project.ps1` for a private source snapshot before code changes. It excludes actual credential files and generated caches but includes current project code/docs/tools. Runtime database backups should remain outside the GitHub repository. Historical phase-specific scripts in `tools/history/legacy-release-scripts/` are retained for reference only.
+
+
+## Hosting-specific note: Falix Free
+
+Falix Free advertises weekly manual renewal and crash notifications; automatic crash restarts are listed as Premium. A final application shutdown backup is best-effort only. Keep hourly per-server ZIP delivery configured and check logs for failures. See [Falix test setup](falix_free_test.md).

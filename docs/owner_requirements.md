@@ -1,40 +1,24 @@
-# Feature scope and implementation status
+# Owner-requested features and decisions
 
-This document summarizes the feature behavior supported by the current Update 0.6.3 documentation. A feature described here should still be verified against the working source and tested in a development Discord server before being treated as production-ready.
+This document tracks user-facing requirements from the bot owner and separates implemented behavior from unresolved requests.
 
-## Implemented through Update 0.6.3
+## Implemented in the 0.7.1 hotfix worktree (requires live acceptance testing)
 
-### Per-server storage and transactions
+- Timed invite events: authorized staff can start/end events, use Admin Dashboard reward/duration defaults or override them per command, and let the periodic task end expired events. The bot awards an inviter only when invite use attribution is unique and the join is eligible during an active event. Manage Server permission is required for invite inspection.
+- Balance audit: `/add` and `/deduct` store actor, target, delta, resulting balance in message context, and reason. The transaction ledger stores the actor ID. Ticket payouts/refunds include the action actor when there is one; audit channel messages include the movement ledger. Automated rewards are recorded as system/invite-event transactions.
+- Configurable audit channel: set through the Admin Dashboard. Receives ticket transcripts, credit/ticket financial logs, invite event/reward logs, and scam reports.
+- Ticket transcript/history: on completed/refunded tickets, the bot exports message text, embed titles/descriptions/fields, timestamps, authors, and attachment URLs into a text file posted in the audit channel. `/ticket-history` displays retained ticket records with transcript links.
+- Scam reports: the public Help Center includes a Report Scam button. Reports are stored and posted to the audit channel with the reported member's recent ticket transcript links. Staff can list open reports with `/scam-reports` and mark one confirmed/dismissed with `/scam-review`.
+- Transcript retention: at most 100 tracked transcript posts are retained in the configured channel. When transcript 101 is successfully posted/indexed, the oldest transcript post is deleted. Unrelated audit messages/reports are not pruned by this rule.
+- Database history retention: retain the latest 500 closed ticket records with confirmed transcripts, plus all open tickets and closed tickets that still need transcript recovery. When an eligible old ticket row is pruned, its ticket-linked transaction rows are pruned in the same database operation after deleting child rows first. User balances and standalone credit-adjustment entries remain. Keep an external backup if a complete historical ledger is required.
+- Ticket channel labels and transcript labels are separate. New channel labels progress through available numeric labels and reset to `ticket-001` when the server has no open tickets; active ticket labels must never collide. Permanent transcript identifiers progress `Ticket-001` through `Ticket-999`, then `Ticket-1│000`, `Ticket-1│001`, `Ticket-2│000`, etc., and never reset. Database `ticket_id` remains the internal primary key. Transcript retention keeps the 100 most recent tracked transcript posts in the configured audit channel and removes the oldest Discord post only after a new transcript has been posted and indexed. Separately, database history retains 500 recent closed ticket records with confirmed transcripts, plus open tickets and records still needing transcript recovery; ticket-linked transaction rows for pruned history are also removed.
+- Event removal: “Remove Event” disables an event in the selectable catalog rather than hard-deleting it, preserving the historical `event_key` and old tickets.
+- Runtime and data hosting: `private-configs/credentials.env` supports the database backend/URL and backup settings. PostgreSQL mode uses one schema per Discord server. An opt-in encrypted backup service creates and sends a separate ZIP for each server each hour and on graceful shutdown.
 
-- Each server has an independent SQLite database and local ticket-number sequence.
-- Ticket reservations, completion payouts, refunds, and balance adjustments use atomic transactions and audited ledger entries.
-- Database safeguards help prevent duplicated reservations, payouts, refunds, ticket numbers among open tickets, and repeated idempotent adjustments.
-- Initial starting credits are ledgered for newly initialized accounts; migrations do not fabricate historical starting-balance entries.
+## Deferred/important limitations
 
-### Admin Dashboard and Help Center
-
-- `/setup admin_dashboard` posts or updates a dashboard in the invoking text channel.
-- `/setup public_tickets` posts or updates the public Help Center panel.
-- Per-server settings include new-account starting credits, service catalog/prices, maximum helper count, Help Center placement, dashboard moderator roles, and a ticket staff baseline role.
-- Updating starting credits does not rewrite existing balances.
-
-### Ticket lifecycle and roster
-
-- Requester-proposed completion/cancellation requires all active helpers to confirm. A helper may reject a pending proposal; timeout/rejection moves no credits.
-- Helpers can leave and have access revoked. If every helper leaves, the requester is refunded and the ticket is scheduled for deletion.
-- The requester selects proposed replacement helpers privately, then authorized staff approve or disapprove the submitted list.
-- Staff escalation commands are distinct from the normal ticket buttons and are restricted for participants in the ticket they are trying to override.
-
-### Credit moderation and pricing
-
-- `/add` and `/deduct` can be executed only by the actual Discord server owner, and are blocked while the owner participates in any open ticket.
-- Adjustments are atomic, audited, idempotent, and cannot deduct a balance below zero.
-- Service price is stored as a per-helper unit rate for new tickets. Reserved total is unit rate multiplied by selected helper count. Old tickets without the unit-price snapshot preserve legacy payout behavior.
-
-## Not implemented yet
-
-Dashboard invite-reward settings can be saved, but invite usage attribution, eligibility checks, event start/end commands, automatic event expiry, and automatic reward payouts are not operational. Hosting, production monitoring, and full live acceptance testing are still follow-up work according to the current project notes.
-
-## Acceptance rule
-
-Do not promote a planned feature to “implemented” based solely on saved settings, a command being visible, or a passing database test. Confirm that the current code implements the complete flow and that the flow has been tested in a development server.
+- **Admin-editable ticket welcome message (v0.8.0):** an ordinary, unpinned, non-embed message is sent when a new ticket is created. Administrators and configured dashboard moderators can edit the per-server template from the Admin Dashboard. Supported placeholders are `{requester}`, `{helpers}`, `{ticket}`, and `{event}`. The message is only sent to new tickets; editing the template does not rewrite existing ticket conversations. Live acceptance testing is still required.
+- Automatic invite rewards depend on the Discord API returning usable invite usage counts and inviter information. Multiple invites increasing at once, API errors, missing inviter data, or missing Manage Server permissions mean no reward is awarded rather than guessing.
+- PostgreSQL compatibility/migration is newly introduced and must be tested against a live provider before production cutover. Retain SQLite source copies until data verification is complete.
+- Discord DM backups are best-effort. Forced kills, provider termination deadlines, DM restrictions, file-size limits, or API failure can prevent an hourly or shutdown upload. Keep a separate recovery copy for important production data.
+- The transcript archive includes text and references to attachments (URLs); it does not re-upload every source attachment's binary into the transcript text file.

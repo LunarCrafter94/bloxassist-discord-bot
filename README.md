@@ -1,83 +1,69 @@
+![BloxAssist banner](assets/branding/bot-client_banner.png)
+
 # Blox Fruits Helper Credit Bot
 
-A slash-command Discord bot for managing helper tickets and credit balances in Blox Fruits community servers. Each server keeps its own SQLite database, so balances, tickets, service settings, and transaction history remain separate between servers.
+![BloxAssist icon](assets/branding/bot-client_icon.png)
 
-> **Current documented release: Update 0.6.3.** Run the automated checks and test the live Discord workflows in a development server before relying on the bot with real credit balances. Passing unit tests does not prove that every Discord interaction or permission overwrite works in a live server.
+A slash-command Discord bot for multi-server ticket support and credit balances. Each Discord server has isolated data, ticket numbering, services, settings, audit records, and invite-reward event history.
 
-## What it does
+> **v0.8.0 development worktree.** This build separates reusable active-ticket channel labels from permanent transcript identifiers, adds an editable plain-text ticket welcome message, caps retained closed-ticket history, and smooths Ctrl+C shutdown. Automated database tests pass in this validation environment; live Discord UI, channel-name validation, host behavior, PostgreSQL, and backup delivery still need acceptance testing before production use.
 
-- Creates a public Help Center panel where members can check their balance and open tickets.
-- Creates numbered ticket channels independently per server (`ticket-001`, `ticket-002`, and so on). Ticket numbers can restart after that server has no open tickets; closed ticket records remain in the database.
-- Reserves credits atomically when a ticket is created and records balance changes in a transaction ledger.
-- Requires the requester to propose completion or cancellation and every active helper to confirm. A helper can reject a pending proposal. A pending proposal expires after 15 minutes without moving credits.
-- Supports helper departure and requester-selected replacement helpers, with staff approval of the submitted replacement list.
-- Provides a configurable Admin Dashboard for starting credits for new accounts, the event/service catalog, per-helper prices, helper limits, ticket staff access, Help Center placement, and moderator roles.
-- Provides `/add` and `/deduct` for the actual Discord server owner only, with audit records and safeguards against negative balances and duplicate adjustments.
+## Features
 
-## Important current limitations
+- Public Help Center panel with ticket creation, balances, and a **Report Scam** form.
+- Persistent ticket workflow: requester proposes completion/cancellation, active helpers confirm, helpers may leave, and replacement helpers require staff approval.
+- Configurable per-server Admin Dashboard, event catalog, starting credits for new accounts, helper limits, moderator roles, ticket staff policy, Help Center placement, and audit/transcript channel.
+- `/add` and `/deduct` are restricted to the actual server owner and write actor/reason details to the transaction ledger and configured audit channel.
+- Completed/refunded tickets create text transcripts in the configured audit channel. If the transcript cannot be safely stored, the bot attempts to archive the original channel for moderator-only review rather than deleting the evidence.
+- Active ticket channel numbers are allocated separately and restart at `ticket-001` when no tickets remain open; active ticket channels are never assigned the same label. Permanent transcript identifiers never reset: `Ticket-001` through `Ticket-999`, then `Ticket-1│000`, `Ticket-1│001`, `Ticket-2│000`, and so on. At most **100 tracked transcript posts** remain in the configured audit channel. The database retains the **500 most recent closed tickets with confirmed transcripts**, plus open tickets and closed tickets that still need transcript recovery. Older eligible ticket rows and their per-ticket ledger rows are pruned; current balances, settings, services, and standalone credit-adjustment ledger entries are retained.
+- `/ticket-history` links to retained transcripts. `/scam-reports` lists open reports, and `/scam-review` lets authorized staff mark a report confirmed or dismissed with an audit note.
+- Timed invite reward events use `/invite-event start` and `/invite-event end`. The command uses reward/duration defaults configured in the Admin Dashboard unless explicit values are provided. Expiration is checked automatically. Invite attribution requires the bot to have **Manage Server** permission to inspect invite use counts; ambiguous attribution is skipped rather than guessed.
+- Optional hourly encrypted ZIP backups, one ZIP per server, sent to a configured Discord DM. The configured Audit Log Channel also receives one startup notice per process and a graceful-shutdown notice. A forced kill cannot send a shutdown notice or guarantee the final backup.
 
-Invite-reward settings can be saved in the dashboard, but invite attribution, operational invite events, automatic expiry, and reward payouts are **not implemented**. Do not advertise invite rewards as an available feature or enable them expecting automatic payouts.
+## Storage options
 
-Hosting, production monitoring, and a full live end-to-end acceptance run remain follow-up work. The database tests do not replace testing commands, message components, role permissions, and channel changes in Discord.
+### Local SQLite (default and safest starting point)
 
-## Requirements
-
-- Python 3.13 or newer; the project has been run in the existing Python 3.15 environment.
-- A Discord application and bot token.
-- The Python packages listed in `requirements.txt`.
-- A development Discord server for initial setup and acceptance testing.
-
-## Run locally
-
-1. Clone or extract the project, then open a terminal in the project root.
-2. Create and activate a virtual environment if you do not already have one:
-
-   ```powershell
-   py -3 -m venv .venv
-   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-   ```
-
-3. Copy `private-configs/tokens.env.example` to `private-configs/tokens.env` and set `DISCORD_TOKEN` to the bot token. Set `GUILD_ID` to your development server ID for quicker test-server command synchronization; leave it blank when you intentionally want global command synchronization.
-4. Start the bot:
-
-   ```powershell
-   .\.venv\Scripts\python.exe RunBot.py
-   ```
-
-5. In the development server, run `/setup admin_dashboard` in a staff-only channel and `/setup public_tickets` in the public Help Center channel. Configure the event catalog and permissions, then test the ticket lifecycle before using the bot in a public server.
-
-For the complete setup, backup, update, and validation procedure, see [`INSTALL.md`](INSTALL.md). To reorganize existing documentation and archive the old phase-specific scripts safely, extract the cleanup bundle elsewhere and run `tools/Organize-Documentation.ps1` from the extracted package; see the package instructions first.
-
-## Discord permissions and intents
-
-The bot needs `Manage Channels` to create/delete ticket channels and `Manage Roles` to edit ticket-channel permission overwrites for staff access, helper departure, and approved replacements. It also needs `View Channel`, `Send Messages`, `Read Message History`, and `Embed Links` where it operates. Configure the bot role hierarchy and channel/category overwrites so the required permissions are effective. Do not grant `Administrator` solely to avoid permission troubleshooting.
-
-Enable **Server Members Intent** in the Discord Developer Portal if you want the bot to initialize users when they join. Accounts are also initialized when users first use supported credit/ticket interactions. The bot is slash-command-only and does not require Message Content Intent for prefix commands.
-
-## Data and safety
-
-Each server's database is stored at:
+Each server uses:
 
 ```text
 data/servers/<server_id>/blox_fruits_credit_system.sqlite3
 ```
 
-The database holds balances, tickets, ledger entries, and per-server settings. Keep the main SQLite file and any `-wal`, `-shm`, or journal sidecars together when making a file-level backup. Stop the bot and close database viewers before backing up or restoring.
+The database stores `users`, `tickets`, `transactions`, `settings`, `services`, `invite_events`, `invite_rewards`, and `scam_reports`. SQLite WAL sidecars may be present while the bot is running. Do not delete or replace those files by hand.
 
-Never commit or share `private-configs/tokens.env`, SQLite databases, runtime data, backup archives, logs, or real member/credit data. The `.gitignore` is intended to exclude these local files; confirm `git status` before every push. If a bot token has been exposed, rotate it in the Discord Developer Portal.
+### PostgreSQL (experimental until live-tested)
 
-## Project map
+Set `DATABASE_BACKEND=postgresql` and `DATABASE_URL` in `private-configs/credentials.env` or the hosting provider's secret/environment settings. The bot creates a separate PostgreSQL schema named `server_<Discord server ID>` for each guild, preserving server-level isolation inside a hosted PostgreSQL database.
 
-```text
-RunBot.py                         # launcher
-source-files/bloxfruits_helper_credit_bot/  # application package
-private-configs/tokens.env.example          # safe configuration template
-requirements.txt                  # Python dependencies
-tests/                            # automated tests
-tools/                            # maintenance and verification scripts
-docs/                             # maintained references and docs/history/ archive
-data/                             # local runtime databases; do not commit
-_backups/                         # local backup snapshots; do not commit
+Before switching a real deployment, stop the bot and place recoverable SQLite database files under `data/servers/`. Run `tools/Migrate-SQLite-To-Postgres.py`; it checks that the target schemas are fresh, asks for explicit confirmation, imports each server's records, resets serial sequences, and checks row counts. It is intentionally refusing to overwrite non-empty target schemas. Compare balances, tickets, settings, and ledger history manually before pointing production at PostgreSQL.
+
+## Setup
+
+1. Install Python 3.13 or newer, then run `python -m pip install -r requirements.txt`. For Falix, select Python 3.13.
+2. Copy `private-configs/credentials.env.example` to `private-configs/credentials.env` for local use and fill in `DISCORD_TOKEN`. On Falix, use panel environment/secret variables instead of uploading real credentials. Leave `DATABASE_BACKEND=sqlite` for the first host test. Add `DATABASE_URL` only when a PostgreSQL database is ready.
+3. Start locally with `python RunBot.py`. For Falix's Python template, set the Main file to `app.py` if available; that launcher delegates to the existing `RunBot.py` entry point.
+4. In a staff-only channel, run `/setup admin_dashboard`. Set an **Audit Log Channel** where the bot can send messages, embed links, attach files, and read message history. This channel receives ticket transcripts, credit movement audit entries, invite reward logs, and scam reports.
+5. Run `/setup public_tickets` in the public Help Center channel. Test in a development Discord server before using real balances.
+
+For a free host test, see [`docs/falix_free_test.md`](docs/falix_free_test.md). See [`docs/installation_and_operations.md`](docs/installation_and_operations.md) for full environment, permissions, migration, backup, and verification steps; [`docs/backup_and_restore.md`](docs/backup_and_restore.md) for backup/restore details; and [`docs/release_history.md`](docs/release_history.md) for the current change summary and [`docs/changelog-0.8.0.md`](docs/changelog-0.8.0.md) for this development release draft.
+
+Historical install/changelog files are archived in [`docs/history/releases/historical-installation-and-changelogs.zip`](docs/history/releases/historical-installation-and-changelogs.zip). They are reference material only; use the maintained docs linked above for current instructions.
+
+## Backup settings
+
+Set the following environment variables in `credentials.env` or your hosting secrets to enable encrypted hourly per-server ZIP backups:
+
+```dotenv
+BACKUP_DISCORD_USER_ID=your_numeric_discord_user_id
+BACKUP_ENCRYPTION_PASSWORD=a_long_random_password
 ```
 
-The project uses its established naming conventions documented in [`docs/naming_convention.md`](docs/naming_convention.md). SQL transactions and audit safeguards are summarized in [`docs/transaction_safety.md`](docs/transaction_safety.md). See [`CHANGELOG.md`](CHANGELOG.md) for consolidated release history.
+The bot needs to be able to DM the selected user. The ZIP is encrypted with WinZip AES-256; store the password separately from the backup. The backup service intentionally skips sending oversized archives rather than silently treating a failed send as success. It records success/failure in the host logs. A graceful shutdown backup is best-effort, not guaranteed after a forced process kill.
+
+## Permissions and safety
+
+- Required ticket capabilities include `View Channel`, `Send Messages`, `Read Message History`, `Embed Links`, `Manage Channels`, and `Manage Roles` where the workflow applies channel permission overwrites. Grant only the permissions your configuration needs.
+- Invite tracking needs `Manage Server` to inspect invite uses. If the invite-use change cannot be uniquely attributed, no reward is issued.
+- Do not commit `private-configs/credentials.env`, real tokens, database files, backups, logs, or real member/credit data. `.gitignore` excludes these by design.
+- The Admin Dashboard can edit the ordinary plain-text welcome message sent to new ticket channels. It is not pinned and is not an embed. Supported placeholders: `{requester}`, `{helpers}`, `{ticket}`, and `{event}`. Existing ticket conversations are not rewritten.
