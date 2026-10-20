@@ -10,6 +10,7 @@ import discord
 
 from ..database import DatabaseManager, GuildDatabase
 from ..interaction_utils import SendEphemeralResponse
+from ..ticket_messages import DEFAULT_TICKET_WELCOME_MESSAGE, RenderTicketWelcomeMessage
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +229,25 @@ def BuildDashboardEmbed(guild: discord.Guild, guildDatabase: GuildDatabase) -> d
     embed.add_field(name="Public Help Center", value=helpCenterText, inline=True)
     embed.add_field(name="Ticket staff access baseline", value=baselineText, inline=True)
     embed.add_field(name="Dashboard moderator roles", value=moderatorText, inline=False)
+    auditChannelId = guildDatabase.GetSetting("audit_log_channel_id", "") or ""
+    auditChannelText = f" <#{auditChannelId}>" if auditChannelId.isdigit() else "Not configured"
+    embed.add_field(name="Ticket transcripts · audit log · scam reports", value=auditChannelText, inline=False)
+    welcomeText = (guildDatabase.GetSetting("ticket_welcome_message", "") or "").strip()
+    welcomeState = "Enabled" if welcomeText else "Disabled"
+    embed.add_field(
+        name="New ticket welcome message",
+        value=f"{welcomeState} · ordinary text, not pinned and not an embed",
+        inline=False,
+    )
+    activeInviteEvent = guildDatabase.GetActiveInviteEvent()
+    if activeInviteEvent is not None:
+        embed.add_field(
+            name="Active invite event",
+            value=f"Event #{int(activeInviteEvent['event_id'])} · {int(activeInviteEvent['reward_credits']):,} credits per eligible join\nEnds: {activeInviteEvent['ends_at']}",
+            inline=False,
+        )
+    else:
+        embed.add_field(name="Active invite event", value="None", inline=False)
     embed.set_footer(text="Event price is per helper. Total reservation = price per helper × selected helper count. Unfilled slots are refunded at completion.")
     return embed
 
@@ -417,6 +437,65 @@ class DashboardView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="Audit Log Channel", emoji="📜", style=discord.ButtonStyle.primary, custom_id="bf:dashboard:audit_channel", row=3)
+    async def AuditLogChannel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await EnsureDashboardAccess(interaction, self.databaseManager):
+            return
+        await SendEphemeralResponse(
+            interaction,
+            "Choose the private channel where ticket transcripts, credit-change audit entries, invite rewards, and scam reports should be posted. Give the bot Send Messages, Embed Links, Attach Files, and Read Message History.",
+            view=AuditLogChannelView(self.databaseManager),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Ticket Welcome Message", emoji="💬", style=discord.ButtonStyle.primary, custom_id="bf:dashboard:ticket_welcome_message", row=4)
+    async def TicketWelcomeMessage(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await EnsureDashboardAccess(interaction, self.databaseManager):
+            return
+        db = self.databaseManager.ForServer(interaction.guild_id)
+        currentMessage = db.GetSetting("ticket_welcome_message", DEFAULT_TICKET_WELCOME_MESSAGE)
+        await interaction.response.send_modal(
+            TicketWelcomeMessageModal(self.databaseManager, currentMessage or "")
+        )
+
+    @discord.ui.button(label="Preview Welcome", emoji="👁️", style=discord.ButtonStyle.secondary, custom_id="bf:dashboard:ticket_welcome_preview", row=4)
+    async def PreviewTicketWelcome(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await EnsureDashboardAccess(interaction, self.databaseManager):
+            return
+        db = self.databaseManager.ForServer(interaction.guild_id)
+        template = db.GetSetting("ticket_welcome_message", "") or ""
+        if not template.strip():
+            await SendEphemeralResponse(interaction, "The custom ticket welcome message is disabled.", ephemeral=True)
+            return
+        preview = RenderTicketWelcomeMessage(
+            template,
+            requester="@Requester",
+            helpers="@Helper1 @Helper2",
+            ticket="001",
+            event="V4 Trials",
+        )
+        if len(preview) > 1750:
+            preview = preview[:1747] + "..."
+        await SendEphemeralResponse(
+            interaction,
+            "**Preview only — these are example values, not real mentions:**\n\n" + preview,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @discord.ui.button(label="Reset Welcome Message", emoji="↩️", style=discord.ButtonStyle.secondary, custom_id="bf:dashboard:ticket_welcome_reset", row=4)
+    async def ResetTicketWelcome(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await EnsureDashboardAccess(interaction, self.databaseManager):
+            return
+        db = self.databaseManager.ForServer(interaction.guild_id)
+        db.SetSetting("ticket_welcome_message", DEFAULT_TICKET_WELCOME_MESSAGE)
+        await SendEphemeralResponse(
+            interaction,
+            "✅ The ticket welcome message was reset to the default for new tickets. Existing tickets are unchanged.",
+            ephemeral=True,
+        )
+        await RefreshDashboardMessage(interaction.guild, db, self.databaseManager)
+
     @discord.ui.button(label="Refresh Dashboard", emoji="🔄", style=discord.ButtonStyle.success, custom_id="bf:dashboard:refresh", row=3)
     async def Refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await EnsureDashboardAccess(interaction, self.databaseManager):
@@ -426,6 +505,44 @@ class DashboardView(discord.ui.View):
         await ApplyTicketStaffRolePolicy(interaction.guild, guildDatabase)
         await interaction.edit_original_response(embed=BuildDashboardEmbed(interaction.guild, guildDatabase), view=self)
         await RefreshHelpCenterPanelIfConfigured(interaction.guild, self.databaseManager)
+
+
+class TicketWelcomeMessageModal(discord.ui.Modal, title="Ticket Welcome Message"):
+    welcomeMessage = discord.ui.TextInput(
+        label="Plain-text message (blank disables)",
+        placeholder="Use {requester}, {helpers}, {ticket}, or {event}",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=2000,
+    )
+
+    def __init__(self, databaseManager: DatabaseManager, currentMessage: str):
+        super().__init__(timeout=180)
+        self.databaseManager = databaseManager
+        # A blank value intentionally disables the optional message.
+        self.welcomeMessage.default = currentMessage[:2000] if currentMessage else None
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await EnsureDashboardAccess(interaction, self.databaseManager):
+            return
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this setting inside a server.", ephemeral=True)
+            return
+        content = str(self.welcomeMessage.value or "").strip()
+        if len(content) > 2000:
+            await SendEphemeralResponse(interaction, "The welcome message must be 2,000 characters or fewer.", ephemeral=True)
+            return
+        db = self.databaseManager.ForServer(interaction.guild_id)
+        db.SetSetting("ticket_welcome_message", content)
+        status = "disabled for new tickets" if not content else "saved for new tickets"
+        await SendEphemeralResponse(
+            interaction,
+            f"✅ Ticket welcome message {status}. This is an ordinary message, not pinned and not an embed. Existing tickets are unchanged.\n\n"
+            "Supported placeholders: {requester}, {helpers}, {ticket}, {event}. "
+            "Mentions in this custom message will not ping members. Reopen the editor to change it again.",
+            ephemeral=True,
+        )
+        await RefreshDashboardMessage(interaction.guild, db, self.databaseManager)
 
 
 class StartingCreditsModal(discord.ui.Modal, title="Starting Credits for New Accounts"):
@@ -527,10 +644,27 @@ class InviteSettingsModal(discord.ui.Modal, title="Invite Reward Defaults"):
         db.SetSetting("invite_rewards_enabled", "true" if isEnabled else "false")
         db.SetSetting("invite_reward_credits", int(rewardText))
         db.SetSetting("invite_duration_minutes", int(durationText))
-        await SendEphemeralResponse(interaction, 
-            "✅ Invite reward defaults saved. These settings prepare the reward policy; actual invite attribution and reward processing are not enabled until the invite-event phase is implemented.",
+        endedActiveEvent = None
+        if not isEnabled:
+            # Turning off the global invite-reward switch also ends a live event, so
+            # joins after this change cannot receive rewards unexpectedly.
+            endStatus, endedActiveEvent = db.EndInviteEvent(endedBy=interaction.user.id)
+            if endStatus == "none_active":
+                endedActiveEvent = None
+        await SendEphemeralResponse(
+            interaction,
+            "✅ Invite reward settings saved. " + (
+                "The active event was ended because invite rewards were disabled. " if endedActiveEvent else ""
+            ) + "When enabled, staff can use `/invite-event start` to begin a timed event and `/invite-event end` to stop it early. Invite attribution requires the bot's Manage Server permission.",
             ephemeral=True,
         )
+        if endedActiveEvent is not None:
+            auditEmbed = discord.Embed(
+                title="🛑 Invite reward event ended",
+                description=f"Invite event #{int(endedActiveEvent['event_id'])} ended because invite rewards were disabled in the Admin Dashboard by <@{interaction.user.id}>.",
+                color=discord.Color.orange(), timestamp=discord.utils.utcnow(),
+            )
+            await SendAuditLog(interaction.guild, db, auditEmbed)
         await RefreshDashboardMessage(interaction.guild, db, self.databaseManager)
 
 
@@ -681,6 +815,31 @@ class EventCatalogView(discord.ui.View):
         await RefreshDashboardMessage(interaction.guild, db, self.databaseManager)
         await RefreshHelpCenterPanelIfConfigured(interaction.guild, self.databaseManager)
 
+    @discord.ui.button(label="Remove Event", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
+    async def RemoveSelected(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self._Authorized(interaction):
+            return
+        if not self.selectedKey:
+            await SendEphemeralResponse(interaction, "Select an event first.", ephemeral=True)
+            return
+        db = self.databaseManager.ForServer(interaction.guild_id)
+        service = db.GetService(self.selectedKey, activeOnly=False)
+        if service is None:
+            await SendEphemeralResponse(interaction, "That event no longer exists.", ephemeral=True)
+            return
+        if not bool(int(service["active"])):
+            await SendEphemeralResponse(interaction, f"**{service['name']}** is already removed from the active event list.", ephemeral=True)
+            return
+        # Soft-remove: preserve service key/name and old ticket references for history.
+        db.SaveService(self.selectedKey, str(service["name"]), int(service["price"]), active=False)
+        self.sourceMessage = interaction.message
+        await interaction.response.edit_message(
+            content=f"🗑️ **{service['name']}** was removed from new ticket requests. Historical tickets remain intact.",
+            embed=BuildServiceCatalogEmbed(db), view=self,
+        )
+        await RefreshDashboardMessage(interaction.guild, db, self.databaseManager)
+        await RefreshHelpCenterPanelIfConfigured(interaction.guild, self.databaseManager)
+
     @discord.ui.button(label="Refresh", emoji="🔄", style=discord.ButtonStyle.secondary, row=1)
     async def Refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await self._Authorized(interaction):
@@ -777,6 +936,55 @@ def _MakeUniqueServiceKey(guildDatabase: GuildDatabase, name: str) -> str:
         candidate = f"{baseKey[:48-len(suffixText)]}{suffixText}"
         suffix += 1
     return candidate
+
+
+class AuditLogChannelPicker(discord.ui.ChannelSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Choose the private audit/transcript text channel",
+            min_values=1, max_values=1, channel_types=[discord.ChannelType.text],
+            custom_id="bf:dashboard:audit_channel_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, AuditLogChannelView):
+            await SendEphemeralResponse(interaction, "This selector expired. Reopen Audit Log Channel from the dashboard.", ephemeral=True)
+            return
+        if not await EnsureDashboardAccess(interaction, view.databaseManager):
+            return
+        channel = interaction.guild.get_channel(self.values[0].id) if interaction.guild else None
+        if not isinstance(channel, discord.TextChannel):
+            await SendEphemeralResponse(interaction, "Choose a normal text channel in this server.", ephemeral=True)
+            return
+        botMember = interaction.guild.me
+        permissions = channel.permissions_for(botMember) if botMember else None
+        required = {
+            "View Channel": bool(permissions and permissions.view_channel),
+            "Send Messages": bool(permissions and permissions.send_messages),
+            "Embed Links": bool(permissions and permissions.embed_links),
+            "Attach Files": bool(permissions and permissions.attach_files),
+            "Read Message History": bool(permissions and permissions.read_message_history),
+        }
+        missing = [name for name, allowed in required.items() if not allowed]
+        if missing:
+            await SendEphemeralResponse(interaction, "I need these permissions in the selected channel: " + ", ".join(missing) + ".", ephemeral=True)
+            return
+        db = view.databaseManager.ForServer(interaction.guild_id)
+        db.SetSetting("audit_log_channel_id", channel.id)
+        await SendEphemeralResponse(
+            interaction,
+            f"✅ Audit log channel set to {channel.mention}. New ticket transcripts, credit-change logs, invite rewards, and scam reports will be sent there.",
+            ephemeral=True,
+        )
+        await RefreshDashboardMessage(interaction.guild, db, view.databaseManager)
+
+
+class AuditLogChannelView(discord.ui.View):
+    def __init__(self, databaseManager: DatabaseManager):
+        super().__init__(timeout=180)
+        self.databaseManager = databaseManager
+        self.add_item(AuditLogChannelPicker())
 
 
 class HelpCenterChannelPicker(discord.ui.ChannelSelect):

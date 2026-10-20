@@ -26,7 +26,7 @@ class SetupCommandTests(unittest.TestCase):
             root = Path(tempDir)
             settings = RuntimeSettings(
                 projectRoot=root,
-                envFile=root / "private-configs" / "tokens.env",
+                envFile=root / "private-configs" / "credentials.env",
                 discordToken="not-used-by-this-test",
                 commandGuildId=None,
             )
@@ -41,7 +41,7 @@ class SetupCommandTests(unittest.TestCase):
                 self.assertEqual(subcommandNames, {"public_tickets", "admin_dashboard"})
                 self.assertIsNone(bot.tree.get_command("admin_dashboard"))
                 commandNames = {command.name for command in bot.tree.get_commands()}
-                self.assertTrue({"add", "deduct", "admin_helper-replace"}.issubset(commandNames))
+                self.assertTrue({"add", "deduct", "admin_helper-replace", "invite-event", "ticket-history", "scam-reports", "scam-review"}.issubset(commandNames))
                 replacementGroup = bot.tree.get_command("admin_helper-replace")
                 self.assertIsNotNone(replacementGroup)
                 self.assertEqual({command.name for command in replacementGroup.commands}, {"approve", "disapprove"})

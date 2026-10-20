@@ -7,8 +7,11 @@ the database from the guild that generated that interaction.
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
-from datetime import timedelta
+import re
+from datetime import timedelta, timezone
+from datetime import datetime as DateTime
 
 import discord
 
@@ -22,6 +25,9 @@ from ..interaction_utils import (
 )
 from ..database import DatabaseManager, GuildDatabase
 from ..admin.dashboard_views import GetDashboardModeratorRoleIds, GetEffectiveTicketStaffRoleIds, SetupDashboardViews
+from ..audit import ResolveAuditChannel, SendAuditLog
+from ..ticket_numbers import TicketChannelLabelFromRow, TicketLabelFromRow
+from ..ticket_messages import RenderTicketWelcomeMessage
 
 
 def GetDatabaseForInteraction(interaction: discord.Interaction, databaseManager: DatabaseManager) -> GuildDatabase:
@@ -60,6 +66,317 @@ def IsConfiguredTicketStaff(interaction: discord.Interaction, guildDatabase: Gui
     permittedRoleIds = set(GetDashboardModeratorRoleIds(guildDatabase))
     memberRoleIds = {role.id for role in getattr(interaction.user, "roles", ())}
     return bool(permittedRoleIds.intersection(memberRoleIds))
+
+
+class ReportScamModal(discord.ui.Modal, title="Report a Scam"):
+    reportedMember = discord.ui.TextInput(
+        label="Reported member (mention or user ID)", placeholder="@member or 123456789012345678",
+        min_length=3, max_length=40,
+    )
+    details = discord.ui.TextInput(
+        label="What happened? Include ticket # if known.",
+        placeholder="Describe the issue and what evidence moderators should review.",
+        style=discord.TextStyle.paragraph, min_length=10, max_length=1500,
+    )
+
+    def __init__(self, databaseManager: DatabaseManager):
+        super().__init__(timeout=300)
+        self.databaseManager = databaseManager
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Reports can only be submitted inside a server.", ephemeral=True)
+            return
+        raw = str(self.reportedMember.value).strip()
+        match = re.fullmatch(r"<@!?(\d{15,22})>|(\d{15,22})", raw)
+        if not match:
+            await SendEphemeralResponse(interaction, "Enter a valid user mention or numeric Discord user ID.", ephemeral=True)
+            return
+        reportedId = int(match.group(1) or match.group(2))
+        if reportedId == interaction.user.id:
+            await SendEphemeralResponse(interaction, "You cannot report yourself.", ephemeral=True)
+            return
+        reportedMemberObj = interaction.guild.get_member(reportedId)
+        if reportedMemberObj is not None and reportedMemberObj.bot:
+            await SendEphemeralResponse(interaction, "Bot accounts cannot be reported through this form.", ephemeral=True)
+            return
+        db = self.databaseManager.ForServer(interaction.guild_id)
+        try:
+            reportId = db.CreateScamReport(interaction.user.id, reportedId, str(self.details.value).strip())
+        except ValueError as error:
+            await SendEphemeralResponse(interaction, str(error), ephemeral=True)
+            return
+        related = db.ListTicketHistoryForMember(reportedId, limit=5)
+        embed = discord.Embed(
+            title=f"🚨 Scam report #{reportId}",
+            description=str(self.details.value).strip()[:4000],
+            color=discord.Color.red(), timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Reported member", value=f"<@{reportedId}> (`{reportedId}`)", inline=False)
+        embed.add_field(name="Reported by", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        ticketLines = []
+        for row in related:
+            ticketLabel = TicketLabelFromRow(row)
+            status = str(row["status"])
+            transcriptChannelId = row["transcript_channel_id"] if "transcript_channel_id" in row.keys() else None
+            transcriptMessageId = row["transcript_message_id"] if "transcript_message_id" in row.keys() else None
+            if transcriptChannelId and transcriptMessageId:
+                link = f"[ticket #{ticketLabel} · {status} transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
+            elif str(status) == "open" and row["channel_id"]:
+                link = f"[ticket #{ticketLabel} · open ticket channel](https://discord.com/channels/{interaction.guild_id}/{int(row['channel_id'])})"
+            else:
+                link = f"ticket #{ticketLabel} · {status} · no transcript was saved"
+            ticketLines.append(link)
+        embed.add_field(
+            name="Recent related ticket history",
+            value="\n".join(ticketLines) if ticketLines else "No matching ticket history found in the retained database records.",
+            inline=False,
+        )
+        delivered = await SendAuditLog(interaction.guild, db, embed)
+        if delivered:
+            await SendEphemeralResponse(interaction, f"✅ Report #{reportId} was saved and sent to the moderation log for review.", ephemeral=True)
+        else:
+            await SendEphemeralResponse(interaction, f"⚠️ Report #{reportId} was saved in the database, but the audit channel is not configured or could not be reached. Please ask an Administrator to set the Audit Log Channel in the Admin Dashboard.", ephemeral=True)
+
+
+async def PublishTicketTranscript(
+    channel: discord.TextChannel, databaseManager: DatabaseManager, ticketId: int, finalStatus: str, actorUserId: int | None = None
+) -> bool:
+    """Save a human-readable ticket transcript to the configured audit channel.
+
+    Only successful transcript posts count toward the 100-transcript rolling window.
+    If delivery fails, callers must keep/archive the original channel instead of deleting it.
+    """
+    db = databaseManager.ForServer(channel.guild.id)
+    auditChannel = await ResolveAuditChannel(channel.guild, db)
+    if auditChannel is None:
+        _logger.error("Ticket transcript could not be stored: audit channel not configured; guild=%s ticket=%s", channel.guild.id, ticketId)
+        return False
+    permissions = auditChannel.permissions_for(channel.guild.me) if channel.guild.me else None
+    if permissions is None or not permissions.send_messages or not permissions.attach_files or not permissions.embed_links or not permissions.read_message_history:
+        _logger.error("Bot lacks permissions for transcript log channel: guild=%s channel=%s", channel.guild.id, auditChannel.id)
+        return False
+    ticket = db.GetTicketById(ticketId)
+    if ticket is None:
+        return False
+    ticketNumber = int(ticket["ticket_number"] or 0)
+    ticketLabel = TicketLabelFromRow(ticket)
+    requesterId = int(ticket["creator_id"])
+    helperIds = db._ParseIdCsv(str(ticket["helper_ids"] or ""))
+    activeHelperIds = db._ParseIdCsv(str(ticket["active_helper_ids"] or ""))
+    lines = [
+        "BloxAssist Ticket Transcript",
+        f"Server: {channel.guild.name} ({channel.guild.id})",
+        f"Ticket label: ticket-{ticketLabel}",
+        f"Database ticket ID: {ticketId}",
+        f"Final status: {finalStatus}",
+        f"Requester ID: {requesterId}",
+        f"Original helper IDs: {', '.join(map(str, helperIds)) or '(none)' }",
+        f"Active helper IDs at close: {', '.join(map(str, activeHelperIds)) or '(none)' }",
+        f"Event key: {ticket['event_key']}",
+        f"Reserved credits: {ticket['reserved_credits']}",
+        f"Generated: {DateTime.now(timezone.utc).isoformat()}",
+        f"Finalized by user ID: {actorUserId if actorUserId is not None else '(system/automatic)' }",
+        "=" * 80,
+        "MESSAGE HISTORY (oldest first)",
+        "=" * 80,
+    ]
+    # Keep the attachment under a conservative 6.5 MB byte limit. Character
+    # counts are not sufficient because UTF-8 emoji and non-Latin text can use
+    # several bytes per character.
+    maximumTranscriptBytes = 6_500_000
+    totalBytes = len(("\n".join(lines)).encode("utf-8", errors="replace"))
+    try:
+        async for message in channel.history(limit=None, oldest_first=True):
+            messageLines = [
+                f"[{message.created_at.isoformat()}] {getattr(message.author, 'display_name', str(message.author))} (user_id={message.author.id})"
+            ]
+            if message.content:
+                messageLines.append(message.content)
+            for embedIndex, embedItem in enumerate(message.embeds, start=1):
+                if embedItem.title:
+                    messageLines.append(f"[Embed {embedIndex} title] {embedItem.title}")
+                if embedItem.description:
+                    messageLines.append(f"[Embed {embedIndex} description] {embedItem.description}")
+                for field in embedItem.fields:
+                    messageLines.append(f"[Embed field: {field.name}] {field.value}")
+            for attachment in message.attachments:
+                messageLines.append(f"[Attachment] {attachment.filename} — {attachment.url}")
+            messageLines.append("")
+            messageBlock = "\n".join(messageLines) + "\n"
+            blockBytes = len(messageBlock.encode("utf-8", errors="replace"))
+            if totalBytes + blockBytes > maximumTranscriptBytes:
+                marker = "[Transcript truncated because it reached the safe 6.5 MB attachment limit.]"
+                lines.append(marker)
+                break
+            lines.extend(messageLines)
+            totalBytes += blockBytes
+    except discord.HTTPException:
+        _logger.exception("Could not fetch ticket message history: guild=%s ticket=%s", channel.guild.id, ticketId)
+        return False
+    transcriptBytes = ("\n".join(lines)).encode("utf-8", errors="replace")
+    filename = f"ticket-{ticketLabel}-transcript.txt"
+
+    embed = discord.Embed(
+        title=f"📜 Transcript · ticket-{ticketLabel}",
+        description=f"**Status:** {finalStatus}\n**Requester:** <@{requesterId}>\n**Event:** `{ticket['event_key']}`\n**Reserved:** {int(ticket['reserved_credits']):,} credits",
+        color=discord.Color.blurple(), timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Helpers", value=", ".join(f"<@{x}>" for x in helperIds) or "None", inline=False)
+    embed.add_field(name="Database ticket ID", value=str(ticketId), inline=True)
+    embed.add_field(name="Transcript", value="Full message text and available embed/attachment references are attached.", inline=False)
+    embed.set_footer(text=f"BloxAssist Transcript | ticket={ticketLabel} | id={ticketId}")
+    try:
+        with io.BytesIO(transcriptBytes) as buffer:
+            file = discord.File(buffer, filename=filename)
+            message = await auditChannel.send(
+                embed=embed, file=file,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        db.SetTicketTranscriptMessage(ticketId, auditChannel.id, message.id)
+    except Exception:
+        _logger.exception("Could not publish or index ticket transcript: guild=%s ticket=%s", channel.guild.id, ticketId)
+        return False
+
+    # Retention runs only after the new transcript has been posted and its message
+    # ID persisted. A failed new upload must never delete an older transcript.
+    # Pruning is best-effort: keep the new evidence even if an old message cannot
+    # be fetched/deleted, and log the issue for later cleanup.
+    retentionSafe = True
+    try:
+        retainedRows = db.Execute(
+            "SELECT ticket_id, transcript_message_id FROM tickets WHERE transcript_channel_id = ? AND transcript_message_id IS NOT NULL ORDER BY ticket_id",
+            (auditChannel.id,), fetchAll=True,
+        )
+        retainedMessages = []
+        verificationFailed = False
+        for row in retainedRows:
+            try:
+                savedMessage = await auditChannel.fetch_message(int(row["transcript_message_id"]))
+                retainedMessages.append((savedMessage.created_at, int(row["ticket_id"]), savedMessage))
+            except discord.NotFound:
+                db.ClearTicketTranscriptMessage(int(row["ticket_id"]))
+            except discord.HTTPException:
+                verificationFailed = True
+                retentionSafe = False
+                _logger.exception("Could not verify saved transcript message %s", row["transcript_message_id"])
+                break
+        if not verificationFailed:
+            retainedMessages.sort(key=lambda item: (item[0], item[1]))
+            while len(retainedMessages) > 100:
+                oldestIndex = next(
+                    (index for index, item in enumerate(retainedMessages) if item[2].id != message.id),
+                    None,
+                )
+                if oldestIndex is None:
+                    break
+                _, oldestTicketId, oldestMessage = retainedMessages.pop(oldestIndex)
+                try:
+                    await oldestMessage.delete(reason="Keep only the 100 most recent ticket transcripts")
+                    db.ClearTicketTranscriptMessage(oldestTicketId)
+                except discord.HTTPException:
+                    retentionSafe = False
+                    _logger.exception("Could not prune oldest ticket transcript %s", oldestMessage.id)
+                    break
+    except Exception:
+        retentionSafe = False
+        _logger.exception("Could not enforce transcript retention in guild %s", channel.guild.id)
+
+    # Now that transcript retention was checked, limit the database's completed
+    # ticket-history index to the latest 500 successfully transcripted records.
+    # Do not prune records if Discord verification/deletion failed, because their
+    # messages may still exist and need to remain discoverable for a later retry.
+    if retentionSafe:
+        try:
+            removedRows = db.PruneTicketHistory(500)
+            if removedRows:
+                _logger.info(
+                    "Pruned %s old closed ticket-history records after transcript retention (guild=%s)",
+                    removedRows, channel.guild.id,
+                )
+        except Exception:
+            _logger.exception("Could not enforce 500-ticket database history retention for guild %s", channel.guild.id)
+    return True
+
+
+async def ArchiveTicketChannel(channel: discord.TextChannel, databaseManager: DatabaseManager, ticketId: int, reason: str) -> bool:
+    """Fallback archive when transcript delivery fails: hide it from ticket participants."""
+    db = databaseManager.ForServer(channel.guild.id)
+    ticket = db.GetTicketById(ticketId)
+    if ticket is None:
+        return False
+    participantIds = {int(ticket["creator_id"]), *db._ParseIdCsv(str(ticket["helper_ids"] or "")), *db._ParseIdCsv(str(ticket["active_helper_ids"] or "")), *db._ParseIdCsv(str(ticket["replacement_candidate_ids"] or ""))}
+    botMember = channel.guild.me
+    try:
+        for memberId in participantIds:
+            member = channel.guild.get_member(memberId)
+            if member is not None:
+                await channel.set_permissions(
+                    member, overwrite=discord.PermissionOverwrite(view_channel=False, send_messages=False, read_message_history=False),
+                    reason="Archive resolved ticket because transcript delivery was not confirmed",
+                )
+        for roleId in GetEffectiveTicketStaffRoleIds(channel.guild, db):
+            role = channel.guild.get_role(roleId)
+            if role is not None and not role.is_default() and not role.managed:
+                await channel.set_permissions(role, overwrite=discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True), reason="Grant ticket moderator archive access")
+        if botMember is not None:
+            await channel.set_permissions(botMember, overwrite=discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, read_message_history=True))
+        category = discord.utils.get(channel.guild.categories, name="Blox Fruits Ticket Archives")
+        if category is None:
+            category = await channel.guild.create_category("Blox Fruits Ticket Archives", reason="Store resolved tickets when transcript delivery fails")
+        ticketLabel = TicketLabelFromRow(ticket)
+        await channel.edit(name=f"archived-ticket-{ticketLabel}", category=category, topic=f"Archived ticket #{ticketLabel}; transcript delivery failed; ticket database ID={ticketId}")
+        await channel.send(f"⚠️ This ticket has been archived for moderator-only review because a transcript could not be delivered to the configured audit channel. Reason: {reason}")
+        return True
+    except discord.HTTPException:
+        _logger.exception("Could not archive ticket channel after transcript failure: guild=%s ticket=%s", channel.guild.id, ticketId)
+        return False
+
+
+async def FinalizeTicketChannel(
+    channel: discord.TextChannel, databaseManager: DatabaseManager, ticketId: int, finalStatus: str, notice: str, actorUserId: int | None = None,
+) -> bool:
+    """Publish transcript first; delete only when stored, otherwise keep a locked archive."""
+    db = databaseManager.ForServer(channel.guild.id)
+    try:
+        await channel.send(notice, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        _logger.exception("Could not announce ticket resolution before transcript: %s", ticketId)
+    success = await PublishTicketTranscript(channel, databaseManager, ticketId, finalStatus, actorUserId)
+    if success:
+        ScheduleTicketChannelDeletion(channel, 15, f"Resolved ticket {ticketId} transcript stored", "🔒 The transcript was saved in the configured audit log. This ticket channel will be deleted in 15 seconds.")
+        resolvedTicket = db.GetTicketById(ticketId)
+        resolvedLabel = TicketLabelFromRow(resolvedTicket) if resolvedTicket is not None else str(ticketId)
+        embed = discord.Embed(title=f"Ticket {finalStatus}", description=f"Ticket #{resolvedLabel} was resolved. A transcript was saved.", color=discord.Color.green())
+        embed.add_field(name="Ticket ID", value=str(ticketId))
+        embed.add_field(name="Resolved by", value=f"<@{actorUserId}> (`{actorUserId}`)" if actorUserId else "Automatic workflow / system", inline=False)
+        # Show the actual ledger movements and the actor recorded in each transaction,
+        # not only a generic resolution notice. The durable audit trail remains in SQL.
+        movements = db.Execute(
+            "SELECT type, amount, from_user, to_user, actor_user_id, note, created_at "
+            "FROM transactions WHERE ticket_id = ? AND amount > 0 ORDER BY id",
+            (int(ticketId),), fetchAll=True,
+        )
+        movementLines = []
+        for movement in movements:
+            actor = f"<@{int(movement['actor_user_id'])}>" if movement["actor_user_id"] is not None else "System / automatic"
+            recipient = f"to <@{int(movement['to_user'])}>" if movement["to_user"] is not None else ""
+            source = f"from <@{int(movement['from_user'])}>" if movement["from_user"] is not None else ""
+            movementLines.append(
+                f"• **{str(movement['type']).replace('_', ' ').title()}**: {int(movement['amount']):,} credits {source} {recipient} · actor {actor}\n"
+                f"  {str(movement['note'] or 'No note')[:150]} · {movement['created_at']}"
+            )
+        embed.add_field(
+            name="Credit movement audit",
+            value=("\n".join(movementLines)[:1024] if movementLines else "No positive-amount credit movement was recorded for this ticket."),
+            inline=False,
+        )
+        await SendAuditLog(channel.guild, db, embed)
+    else:
+        archived = await ArchiveTicketChannel(channel, databaseManager, ticketId, "transcript could not be confirmed")
+        if not archived:
+            _logger.critical("Ticket transcript failed and channel could not be archived; manual data recovery needed: guild=%s ticket=%s", channel.guild.id, ticketId)
+    return success
 
 
 class MainPanelView(discord.ui.View):
@@ -115,6 +432,32 @@ class MainPanelView(discord.ui.View):
         await SendEphemeralResponse(interaction, 
             f"💰 You have **{credits:,} credits** in this server.", ephemeral=True
         )
+
+
+    @discord.ui.button(
+        label="Report Scam", emoji="🚨", style=discord.ButtonStyle.danger,
+        custom_id="bf:report_scam", row=1,
+    )
+    async def ReportScam(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        try:
+            await interaction.response.send_modal(ReportScamModal(self.databaseManager))
+        except discord.NotFound as error:
+            if getattr(error, "code", None) == 10062:
+                _logger.warning("Scam-report modal interaction expired before delivery: interaction=%s", interaction.id)
+                return
+            raise
+        except discord.HTTPException:
+            _logger.exception("Discord rejected the scam-report modal: interaction=%s", interaction.id)
+            # A rejected modal has not consumed the initial response, so show a
+            # useful fallback instead of allowing the persistent View callback to crash.
+            try:
+                await SendEphemeralResponse(
+                    interaction,
+                    "I couldn't open the scam-report form. Please try again; if this continues, notify a server Administrator.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException:
+                _logger.warning("Could not send fallback after modal delivery failure: interaction=%s", interaction.id)
 
 
 class HelperCountSelect(discord.ui.Select):
@@ -430,7 +773,7 @@ async def CreateTicketChannel(
             raise RuntimeError("The reserved ticket is missing its assigned ticket number.")
 
         ticketNumber = int(ticket["ticket_number"])
-        ticketLabel = f"{ticketNumber:03d}"
+        ticketLabel = TicketChannelLabelFromRow(ticket)
         channel = await channel.edit(
             name=f"ticket-{ticketLabel}",
             topic=(
@@ -453,7 +796,7 @@ async def CreateTicketChannel(
                 "When the help is finished, the requester can use "
                 "`/complete_ticket`. Configured staff who are not participants in this ticket "
                 "may use `/admin_complete` only for an escalation.\n\n"
-                "Completion and cancellation require confirmation from every active helper. "
+                "Completion and cancellation require confirmation from the requester and every active helper. The requester or an active helper may propose either action. "
                 "Helpers can leave; replacement requests are shown when only one helper remains."
             ),
             color=discord.Color.green(),
@@ -463,6 +806,31 @@ async def CreateTicketChannel(
             embed=embed,
             view=TicketView(databaseManager),
         )
+
+        # The owner-configured welcome is an ordinary text message, separate from
+        # the existing ticket embed and controls. It is not pinned and is only sent
+        # for new tickets; editing the template does not rewrite existing channels.
+        welcomeTemplate = guildDatabase.GetSetting("ticket_welcome_message", "") or ""
+        welcomeMessage = RenderTicketWelcomeMessage(
+            welcomeTemplate,
+            requester=creator.mention,
+            helpers=helperMentions,
+            ticket=ticketLabel,
+            event=eventName,
+        )
+        if welcomeMessage:
+            try:
+                await channel.send(
+                    welcomeMessage,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                # A custom welcome failure must not undo a valid reservation or
+                # delete an otherwise usable ticket channel.
+                _logger.exception(
+                    "Ticket created but the configured welcome message could not be sent: guild=%s ticket=%s channel=%s",
+                    guild.id, ticketId, channel.id,
+                )
     except Exception:
         # If a ticket was recorded but its channel panel failed, refund atomically.
         if ticketId is not None:
@@ -716,33 +1084,36 @@ async def PostResolutionPrompt(
     guildDatabase: GuildDatabase,
     ticket: object,
     resolutionType: str,
-    requesterId: int,
+    proposerId: int,
     activeHelperIds: list[int],
     databaseManager: DatabaseManager,
 ) -> discord.Message:
-    """Post helper-confirmation controls with the requester counted as approval #1."""
+    """Post approval controls; the proposer is the first approval and everyone else must vote."""
     currentTicket = guildDatabase.GetTicketById(int(ticket["ticket_id"]))  # type: ignore[index]
     if currentTicket is not None:
         ticket = currentTicket
-    ticketNumber = int(ticket["ticket_number"] or 0)  # type: ignore[index]
+    ticketLabel = TicketChannelLabelFromRow(ticket)  # type: ignore[arg-type]
+    requesterId = int(ticket["creator_id"])  # type: ignore[index]
     activeMentions = " ".join(f"<@{helperId}>" for helperId in activeHelperIds)
     if resolutionType == "complete":
         heading = "✅ Completion proposed"
-        instruction = "The ticket pays its active helpers only after every active helper confirms. Any one rejection cancels the proposal."
+        instruction = "The ticket pays its active helpers only after the requester and every active helper approve. Any one rejection cancels the proposal."
     else:
         heading = "🛑 Cancellation proposed"
-        instruction = "The reserved credits are refunded only after every active helper confirms. Any one rejection cancels the proposal."
+        instruction = "The reserved credits are refunded only after the requester and every active helper approve. Any one rejection cancels the proposal."
     confirmationIds = guildDatabase._ParseIdCsv(str(ticket["resolution_confirmations"] or ""))  # type: ignore[index]
-    requiredIds = set([int(requesterId), *activeHelperIds])
+    requiredIds = set([requesterId, *activeHelperIds])
     confirmedCount = len(set(confirmationIds).intersection(requiredIds))
     requiredCount = len(requiredIds)
+    proposalRole = "requester" if proposerId == requesterId else "active helper"
     prompt = await channel.send(
         content=(
-            f"**{heading} — ticket #{ticketNumber:03d}**\n"
-            f"Requester: <@{requesterId}> (their proposal counts as the first approval)\n"
+            f"**{heading} — ticket #{ticketLabel}**\n"
+            f"Requester: <@{requesterId}>\n"
+            f"Proposed by: <@{proposerId}> ({proposalRole}; counts as the first approval)\n"
             f"Active helpers: {activeMentions}\n{instruction}\n\n"
             f"**Progress:** {confirmedCount}/{requiredCount} participants approved.\n"
-            "Only the assigned active helpers can confirm or reject. A helper may veto a proposal while it is still pending, even if they previously confirmed. Once everyone has approved and finalization begins, the decision is locked."
+            "The requester and currently assigned active helpers can confirm or reject. Any participant may veto while the proposal is pending, even after previously approving. Once everyone has approved and finalization begins, the decision is locked."
         ),
         view=TicketResolutionView(databaseManager, resolutionType),
     )
@@ -785,8 +1156,9 @@ async def CompleteCurrentTicket(
     if ticket is None:
         await EditEphemeralOriginalResponse(interaction, content="This channel is not registered as a Blox Fruits ticket.")
         return
-    if not admin and interaction.user.id != int(ticket["creator_id"]):
-        await EditEphemeralOriginalResponse(interaction, content="Only the requester can propose ticket completion.")
+    activeHelperIds = guildDatabase._ParseIdCsv(str(ticket["active_helper_ids"] or ""))
+    if not admin and interaction.user.id != int(ticket["creator_id"]) and interaction.user.id not in activeHelperIds:
+        await EditEphemeralOriginalResponse(interaction, content="Only the requester or an active assigned helper can propose ticket completion.")
         return
     if admin and not IsConfiguredTicketStaff(interaction, guildDatabase):
         await EditEphemeralOriginalResponse(interaction, content="You need Administrator or a configured moderator role to override ticket confirmations.")
@@ -809,6 +1181,7 @@ async def CompleteCurrentTicket(
                 "A completion or cancellation proposal is already awaiting helper responses."
                 if result == "existing_request" else
                 "A replacement request is waiting for staff approval. Please wait before proposing completion or cancellation." if result == "replacement_pending" else
+                "Only the requester or an active assigned helper can propose completion or cancellation." if result == "not_authorized" else
                 "This ticket is already being finalized. Please wait for the result."
                 if result == "processing" else
                 "I couldn't start the completion request because this ticket is no longer open."
@@ -825,7 +1198,7 @@ async def CompleteCurrentTicket(
             _logger.exception("Could not post completion confirmation prompt for ticket %s", ticket["ticket_id"])
             await EditEphemeralOriginalResponse(interaction, content="I couldn't post the helper-confirmation message. No credits were moved; please retry or contact staff.")
             return
-        await EditEphemeralOriginalResponse(interaction, content="Completion proposed. The ticket will be paid only after every active helper confirms.")
+        await EditEphemeralOriginalResponse(interaction, content="Completion proposed. The requester and every active helper must approve before credits are paid.")
         return
 
     # A moderator's explicit /admin_complete remains an auditable override path.
@@ -845,18 +1218,19 @@ async def CompleteCurrentTicket(
         interaction.channel, ticket["resolution_message_id"],
         "✅ A moderator resolved this ticket. This proposal is no longer active.",
     )
-    ScheduleTicketChannelDeletion(
-        interaction.channel, 15, "Blox Fruits ticket completed by moderator override",
-        "🔒 A moderator completed this ticket. Credits were distributed and this channel will be deleted in 15 seconds.",
-    )
     payoutSummary = ", ".join(f"<@{userId}>: {amount:,}" for userId, amount in payouts)
+    await FinalizeTicketChannel(
+        interaction.channel, databaseManager, int(ticket["ticket_id"]), "completed",
+        f"✅ Moderator override completed this ticket. Credits distributed: {payoutSummary or 'none'}.",
+        interaction.user.id,
+    )
     unusedRefund = guildDatabase.GetCompletionRefundAmount(int(ticket["ticket_id"]))
     refundText = f" Unfilled helper-slot refund returned to requester: **{unusedRefund:,} credits**." if unusedRefund else ""
     await EditEphemeralOriginalResponse(interaction, content=f"✅ Moderator override complete. Credits distributed: {payoutSummary or 'none'}.{refundText}")
 
 
 async def CancelUserTicket(interaction: discord.Interaction, databaseManager: DatabaseManager) -> None:
-    """Requester button/command always follows normal helper-confirmation workflow."""
+    """Requester or active helper can propose cancellation; approvals are still required."""
     if interaction.guild_id is None:
         await SendEphemeralResponse(interaction, GetServerOnlyMessage(), ephemeral=True)
         return
@@ -869,13 +1243,13 @@ async def CancelUserTicket(interaction: discord.Interaction, databaseManager: Da
         await EditEphemeralOriginalResponse(interaction, content="You don't have an open ticket in this server.")
         return
 
-    # Being the server owner, an administrator, or a configured moderator never
-    # turns this button/command into an override. Overrides are explicit commands
-    # and are unavailable to anyone involved in the ticket.
-    if interaction.user.id != int(ticket["creator_id"]):
+    # This normal workflow allows the requester or a current active helper to propose;
+    # it never bypasses the approval requirement. Administrative overrides remain explicit.
+    activeHelperIds = guildDatabase._ParseIdCsv(str(ticket["active_helper_ids"] or ""))
+    if interaction.user.id != int(ticket["creator_id"]) and interaction.user.id not in activeHelperIds:
         await EditEphemeralOriginalResponse(
             interaction,
-            content=("Only the requester can propose cancellation through the normal workflow. "
+            content=("Only the requester or an active assigned helper can propose cancellation. "
                      "Configured staff who are not participants may use `/admin_refund` for an escalation."),
         )
         return
@@ -895,9 +1269,10 @@ async def CancelUserTicket(interaction: discord.Interaction, databaseManager: Da
             note="automatic refund because no active helpers remain",
         )
         if status == "refunded" and amount is not None:
-            ScheduleTicketChannelDeletion(
-                ticketChannel, 10, "Ticket cancelled after all helpers left",
-                "🔒 No active helpers remain. The requester was refunded; this channel will be deleted in 10 seconds.",
+            await FinalizeTicketChannel(
+                ticketChannel, databaseManager, int(ticket["ticket_id"]), "refunded",
+                f"↩️ No active helpers remained. The requester was refunded **{amount:,} credits**.",
+                interaction.user.id,
             )
             await EditEphemeralOriginalResponse(interaction, content=f"All helpers have left. Your **{amount:,} credits** were refunded automatically.")
         else:
@@ -909,6 +1284,8 @@ async def CancelUserTicket(interaction: discord.Interaction, databaseManager: Da
             if result == "existing_request" else
             "A replacement request is waiting for staff approval. Please wait before proposing completion or cancellation."
             if result == "replacement_pending" else
+            "Only the requester or an active assigned helper can propose completion or cancellation."
+            if result == "not_authorized" else
             "This ticket is already being finalized. Please wait for the result."
             if result == "processing" else
             "I couldn't start the cancellation request because this ticket is no longer open."
@@ -925,7 +1302,7 @@ async def CancelUserTicket(interaction: discord.Interaction, databaseManager: Da
         _logger.exception("Could not post cancellation confirmation prompt for ticket %s", ticket["ticket_id"])
         await EditEphemeralOriginalResponse(interaction, content="I couldn't post the helper-confirmation message. No credits were moved; please retry or contact staff.")
         return
-    await EditEphemeralOriginalResponse(interaction, content="Cancellation proposed. The reserved credits will be refunded only after every active helper confirms.")
+    await EditEphemeralOriginalResponse(interaction, content="Cancellation proposed. The requester and every active helper must approve before credits are refunded.")
 
 
 async def ConfirmTicketResolutionCurrent(interaction: discord.Interaction, databaseManager: DatabaseManager) -> None:
@@ -944,18 +1321,18 @@ async def ConfirmTicketResolutionCurrent(interaction: discord.Interaction, datab
     result, confirmed, required, resolutionType = db.ConfirmTicketResolution(int(ticket["ticket_id"]), interaction.user.id)
     promptMessage = interaction.message if isinstance(interaction.message, discord.Message) else None
     if result == "no_request":
-        await EditEphemeralOriginalResponse(interaction, content="There is no pending resolution proposal. The requester must submit completion or cancellation first.")
+        await EditEphemeralOriginalResponse(interaction, content="There is no pending resolution proposal. The requester or an active helper must propose completion or cancellation first.")
         if promptMessage is not None:
             await promptMessage.edit(content="ℹ️ This proposal is no longer active. No credits were changed.", view=None)
         return
     if result == "expired":
         if promptMessage is not None:
             await promptMessage.edit(content="⌛ This proposal expired after 15 minutes. No credits were changed; the requester may submit a new request.", view=None)
-        await interaction.channel.send("⌛ The completion/cancellation proposal expired after 15 minutes without every active helper confirming. No credits were changed.")
+        await interaction.channel.send("⌛ The completion/cancellation proposal expired after 15 minutes without all required participants approving. No credits were changed.")
         await EditEphemeralOriginalResponse(interaction, content="That request expired after 15 minutes. No credits were changed.")
         return
-    if result == "not_active_helper":
-        await EditEphemeralOriginalResponse(interaction, content="Only a currently active helper assigned to this ticket can confirm it.")
+    if result in {"not_active_helper", "not_participant"}:
+        await EditEphemeralOriginalResponse(interaction, content="Only the requester or a currently active helper assigned to this ticket can confirm it.")
         return
     if result == "duplicate":
         await EditEphemeralOriginalResponse(interaction, content=f"You've already confirmed this request ({confirmed}/{required}).")
@@ -983,7 +1360,7 @@ async def ConfirmTicketResolutionCurrent(interaction: discord.Interaction, datab
 
     try:
         if resolutionType == "complete":
-            status, payouts = db.CompleteTicket(int(ticket["ticket_id"]), actorUserId=interaction.user.id, note="all active helpers confirmed completion")
+            status, payouts = db.CompleteTicket(int(ticket["ticket_id"]), actorUserId=interaction.user.id, note="requester and all active helpers approved completion")
             if status != "completed":
                 if promptMessage is not None:
                     await promptMessage.edit(content="This ticket was resolved by another action. No duplicate payout was made.", view=None)
@@ -993,21 +1370,27 @@ async def ConfirmTicketResolutionCurrent(interaction: discord.Interaction, datab
             unusedRefund = db.GetCompletionRefundAmount(int(ticket["ticket_id"]))
             refundText = f" Unfilled helper-slot refund returned to requester: **{unusedRefund:,} credits**." if unusedRefund else ""
             if promptMessage is not None:
-                await promptMessage.edit(content=f"✅ All active helpers approved completion. Credits distributed: {summary or 'none'}.{refundText}", view=None)
-            ScheduleTicketChannelDeletion(interaction.channel, 15, "Blox Fruits ticket completed after helper confirmations", "🔒 All active helpers confirmed. Credits were distributed; this channel will be deleted in 15 seconds.")
-            await interaction.channel.send(f"✅ All active helpers confirmed completion. Credits distributed: {summary or 'none'}.{refundText}")
+                await promptMessage.edit(content=f"✅ All required participants approved completion. Credits distributed: {summary or 'none'}.{refundText}", view=None)
+            await FinalizeTicketChannel(
+                interaction.channel, databaseManager, int(ticket["ticket_id"]), "completed",
+                f"✅ All required participants approved completion. Credits distributed: {summary or 'none'}.{refundText}",
+                interaction.user.id,
+            )
             await EditEphemeralOriginalResponse(interaction, content=f"✅ Completion confirmed by all participants ({required}/{required}); credits paid.{refundText}")
         else:
-            status, amount = db.RefundTicket(int(ticket["ticket_id"]), actorUserId=interaction.user.id, note="all active helpers confirmed cancellation")
+            status, amount = db.RefundTicket(int(ticket["ticket_id"]), actorUserId=interaction.user.id, note="requester and all active helpers approved cancellation")
             if status != "refunded" or amount is None:
                 if promptMessage is not None:
                     await promptMessage.edit(content="This ticket was resolved by another action. No duplicate refund was made.", view=None)
                 await EditEphemeralOriginalResponse(interaction, content="The ticket was resolved by another action. No duplicate refund was made.")
                 return
             if promptMessage is not None:
-                await promptMessage.edit(content=f"↩️ All active helpers approved cancellation. <@{ticket['creator_id']}> was refunded **{amount:,} credits**.", view=None)
-            ScheduleTicketChannelDeletion(interaction.channel, 10, "Blox Fruits ticket cancelled after helper confirmations", "🔒 All active helpers confirmed cancellation. The requester was refunded; this channel will be deleted in 10 seconds.")
-            await interaction.channel.send(f"↩️ All active helpers confirmed cancellation. <@{ticket['creator_id']}> was refunded **{amount:,} credits**.")
+                await promptMessage.edit(content=f"↩️ All required participants approved cancellation. <@{ticket['creator_id']}> was refunded **{amount:,} credits**.", view=None)
+            await FinalizeTicketChannel(
+                interaction.channel, databaseManager, int(ticket["ticket_id"]), "refunded",
+                f"↩️ All required participants approved cancellation. <@{ticket['creator_id']}> was refunded **{amount:,} credits**.",
+                interaction.user.id,
+            )
             await EditEphemeralOriginalResponse(interaction, content=f"✅ Cancellation confirmed by all participants ({required}/{required}); **{amount:,} credits** refunded.")
     except Exception:
         _logger.exception("Could not finalize helper-confirmed ticket %s", ticket["ticket_id"])
@@ -1034,17 +1417,17 @@ async def RejectTicketResolutionCurrent(interaction: discord.Interaction, databa
     result, resolutionType = db.RejectTicketResolution(int(ticket["ticket_id"]), interaction.user.id)
     promptMessage = interaction.message if isinstance(interaction.message, discord.Message) else None
     if result == "no_request":
-        await EditEphemeralOriginalResponse(interaction, content="No pending resolution proposal exists. Wait for the requester to propose completion or cancellation.")
+        await EditEphemeralOriginalResponse(interaction, content="No pending resolution proposal exists. Wait for the requester or an active helper to propose completion or cancellation.")
         if promptMessage is not None:
             await promptMessage.edit(content="ℹ️ This proposal is no longer active. No credits were changed.", view=None)
         return
-    if result == "not_active_helper":
-        await EditEphemeralOriginalResponse(interaction, content="Only an active assigned helper can reject this request.")
+    if result in {"not_active_helper", "not_participant"}:
+        await EditEphemeralOriginalResponse(interaction, content="Only the requester or an active assigned helper can reject this proposal.")
         return
     if result == "already_confirmed":
         if promptMessage is not None:
-            await promptMessage.edit(content="⏳ All active helpers have confirmed. The ticket is being finalized.", view=None)
-        await EditEphemeralOriginalResponse(interaction, content="All active helpers have already confirmed; this proposal can no longer be rejected.")
+            await promptMessage.edit(content="⏳ All required participants have confirmed. The ticket is being finalized.", view=None)
+        await EditEphemeralOriginalResponse(interaction, content="All required participants have already confirmed; this proposal can no longer be rejected.")
         return
     if result != "rejected":
         await EditEphemeralOriginalResponse(interaction, content="This ticket is no longer open.")
@@ -1052,8 +1435,8 @@ async def RejectTicketResolutionCurrent(interaction: discord.Interaction, databa
             await promptMessage.edit(view=None)
         return
     if promptMessage is not None:
-        await promptMessage.edit(content=f"👎 {interaction.user.mention} rejected this {resolutionType} proposal. No payout or refund was made. The requester may discuss the issue and submit a new proposal.", view=None)
-    await interaction.channel.send(f"👎 {interaction.user.mention} rejected the proposed {resolutionType} request. No payout or refund was made. The requester can discuss the issue and submit a new request, or staff can resolve it with an override command.")
+        await promptMessage.edit(content=f"👎 {interaction.user.mention} rejected this {resolutionType} proposal. No payout or refund was made. The requester or an active helper may discuss the issue and submit a new proposal.", view=None)
+    await interaction.channel.send(f"👎 {interaction.user.mention} rejected the proposed {resolutionType} request. No payout or refund was made. The requester or an active helper can discuss the issue and submit a new proposal, or configured staff can resolve it with an override command.")
     await EditEphemeralOriginalResponse(interaction, content=f"The {resolutionType} proposal was rejected. No credits were changed.")
 
 
@@ -1209,11 +1592,15 @@ async def LeaveTicketHelper(interaction: discord.Interaction, databaseManager: D
     if not activeIds:
         status, amount = db.RefundTicket(int(ticket["ticket_id"]), actorUserId=interaction.user.id, note="automatic refund because all helpers left")
         if status == "refunded" and amount is not None:
-            ScheduleTicketChannelDeletion(channel, 10, "All helpers left ticket", "🔒 All helpers have left. The requester's reservation was refunded; this channel will be deleted in 10 seconds.")
+            await FinalizeTicketChannel(
+                channel, databaseManager, int(ticket["ticket_id"]), "refunded",
+                "↩️ All helpers left. The requester's reservation was refunded automatically.",
+                interaction.user.id,
+            )
             await channel.send(f"🚨 <@{ticket['creator_id']}> No active helpers remain. Your **{amount:,} reserved credits** have been refunded automatically.")
             roleMentions = GetTicketStaffMentions(interaction.guild, db)
             staffNotice = f"Staff review requested: {roleMentions}." if roleMentions else "Server staff: please review this ticket."
-            await channel.send(f"{staffNotice} All helpers left ticket #{int(ticket['ticket_number'] or 0):03d}; the requester was automatically refunded.")
+            await channel.send(f"{staffNotice} All helpers left ticket #{TicketChannelLabelFromRow(ticket)}; the requester was automatically refunded.")
             try:
                 requester = interaction.guild.get_member(int(ticket["creator_id"])) or await interaction.guild.fetch_member(int(ticket["creator_id"]))
                 await requester.send(f"Your ticket in **{interaction.guild.name}** was closed because all helpers left. Your **{amount:,} reserved credits** were refunded automatically.")
@@ -1318,12 +1705,13 @@ async def RefundCurrentTicket(
         interaction.channel, ticket["resolution_message_id"],
         "↩️ A moderator refunded this ticket. This proposal is no longer active.",
     )
-    ScheduleTicketChannelDeletion(
-        interaction.channel, 10, "Blox Fruits ticket refunded by staff override",
-        f"🔒 A moderator refunded **{amount:,} credits** to <@{ticket['creator_id']}>. This channel will be deleted in 10 seconds.",
+    await FinalizeTicketChannel(
+        interaction.channel, databaseManager, int(ticket["ticket_id"]), "refunded",
+        f"↩️ A moderator refunded **{amount:,} credits** to <@{ticket['creator_id']}>.",
+        interaction.user.id,
     )
     await EditEphemeralOriginalResponse(interaction, 
-        content=f"↩️ Refunded **{amount:,} credits** to <@{ticket['creator_id']}>. The channel will be deleted in 10 seconds."
+        content=f"↩️ Refunded **{amount:,} credits** to <@{ticket['creator_id']}>. A transcript is being saved before channel cleanup."
     )
 
 
@@ -1341,7 +1729,8 @@ def BuildHelpCenterEmbed(guildDatabase: GuildDatabase) -> discord.Embed:
         description=(
             "Use the buttons below to check your balance or create a help ticket.\n\n"
             "🎫 **Create Ticket** — Request help for a Blox Fruits event.\n"
-            "💰 **Balance** — Check your credits in this server.\n\n"
+            "💰 **Balance** — Check your credits in this server.\n"
+            "🚨 **Report Scam** — Send a report to the configured moderation audit channel.\n\n"
             f"New accounts start with **{guildDatabase.GetDefaultJoinCredits():,} credits**. Existing balances do not change when this value is updated. Event prices are per helper; total reservation = listed price × selected helper count."
         ),
         color=discord.Color.blurple(),
@@ -1438,13 +1827,14 @@ async def RefreshOpenTicketViews(guild: discord.Guild, databaseManager: Database
                 service = db.GetService(str(ticket["event_key"]), activeOnly=False)
                 eventName = str(service["name"]) if service is not None else str(ticket["event_key"])
                 ticketNumber = int(ticket["ticket_number"] or 0)
+                ticketLabel = TicketChannelLabelFromRow(ticket)
                 embed = discord.Embed(
-                    title=f"🎫 Ticket #{ticketNumber:03d} — {eventName}",
+                    title=f"🎫 Ticket #{ticketLabel} — {eventName}",
                     description=(
                         f"**Requester:** <@{ticket['creator_id']}>\n"
                         f"**Active helpers:** {helpers}\n"
                         f"**Reserved:** {int(ticket['reserved_credits']):,} credits\n\n"
-                        "Complete/cancel requests need confirmation from every active helper. "
+                        "Complete/cancel requests need confirmation from the requester and every active helper; the requester or an active helper may propose either action. "
                         "Helpers can leave; replacement helpers need staff approval."
                     ),
                     color=discord.Color.green(),
@@ -1466,7 +1856,7 @@ async def RefreshOpenTicketViews(guild: discord.Guild, databaseManager: Database
                     activeIds = db._ParseIdCsv(str(currentTicket["active_helper_ids"]))
                     existingPrompt = await PostResolutionPrompt(
                         channel, db, currentTicket, resolutionType,
-                        int(currentTicket["creator_id"]), activeIds, databaseManager,
+                        int(currentTicket["resolution_requested_by"] or currentTicket["creator_id"]), activeIds, databaseManager,
                     )
                 else:
                     activeIds = db._ParseIdCsv(str(currentTicket["active_helper_ids"]))
@@ -1476,12 +1866,13 @@ async def RefreshOpenTicketViews(guild: discord.Guild, databaseManager: Database
                     requiredCount = len(requiredIds)
                     promptText = (
                         f"**{'✅ Completion' if resolutionType == 'complete' else '🛑 Cancellation'} proposed — "
-                        f"ticket #{int(currentTicket['ticket_number'] or 0):03d}**\n"
-                        f"Requester: <@{currentTicket['creator_id']}> (their proposal counts as the first approval)\n"
+                        f"ticket #{TicketChannelLabelFromRow(currentTicket)}**\n"
+                        f"Requester: <@{currentTicket['creator_id']}>\n"
+                        f"Proposed by: <@{currentTicket['resolution_requested_by'] or currentTicket['creator_id']}> (counts as the first approval)\n"
                         f"Active helpers: {' '.join(f'<@{helperId}>' for helperId in activeIds)}\n"
-                        f"{'The ticket pays its active helpers only after every active helper confirms.' if resolutionType == 'complete' else 'The reserved credits are refunded only after every active helper confirms.'} Any one rejection cancels the proposal.\n\n"
+                        f"{'The ticket pays its active helpers only after the requester and every active helper approve.' if resolutionType == 'complete' else 'The reserved credits are refunded only after the requester and every active helper approve.'} Any one rejection cancels the proposal.\n\n"
                         f"**Progress:** {confirmedCount}/{requiredCount} participants approved.\n"
-                        "Only active helpers assigned to this ticket can respond. A helper may veto a proposal while it is pending, even if they previously confirmed. Once everyone has approved and finalization begins, the decision is locked."
+                        "The requester and currently assigned active helpers can confirm or reject. Any participant may veto while the proposal is pending, even after previously approving. Once everyone has approved and finalization begins, the decision is locked."
                     )
                     await existingPrompt.edit(content=promptText, view=TicketResolutionView(databaseManager, resolutionType))
 

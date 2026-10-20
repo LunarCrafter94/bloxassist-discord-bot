@@ -2,10 +2,93 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from threading import RLock
 from typing import Iterable
+
+from ..ticket_messages import DEFAULT_TICKET_WELCOME_MESSAGE
+
+
+class _PostgresDialectConnection:
+    """Translate the small SQLite SQL dialect differences used by this project."""
+
+    def __init__(self, connection):
+        self.raw = connection
+
+    def execute(self, sql: str, params=()):
+        query = str(sql)
+        stripped = query.lstrip().upper()
+        if stripped.startswith("PRAGMA"):
+            return _NoopCursor()
+        nullableExpiredExpression = "CASE WHEN ? IS NULL OR datetime(?) <= datetime('now', '-15 minutes')"
+        if nullableExpiredExpression in query:
+            # Cast both placeholders; PostgreSQL cannot infer the type of a
+            # bare `%s IS NULL` parameter when the caller passes None.
+            query = query.replace(
+                nullableExpiredExpression,
+                "CASE WHEN (%s)::timestamptz IS NULL OR (%s)::timestamptz <= (now() - interval '15 minutes')",
+            )
+        elif "datetime(?) <= datetime('now', '-15 minutes')" in query:
+            query = query.replace(
+                "datetime(?) <= datetime('now', '-15 minutes')",
+                "(%s)::timestamptz <= (now() - interval '15 minutes')",
+            )
+        if "datetime(resolution_requested_at) <= datetime('now', ?)" in query:
+            query = query.replace(
+                "datetime(resolution_requested_at) <= datetime('now', ?)",
+                "resolution_requested_at::timestamptz <= (now() + (%s)::interval)",
+            )
+        ignoredInsert = "INSERT OR IGNORE INTO" in query.upper()
+        if ignoredInsert:
+            query = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO", "INSERT INTO", query, flags=re.IGNORECASE)
+            query = query.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+        # All parameterized application queries use qmark placeholders and no SQL
+        # string literal containing a question mark. Convert them for psycopg.
+        query = query.replace("?", "%s")
+        if stripped.startswith("BEGIN IMMEDIATE"):
+            query = re.sub(r"^\s*BEGIN\s+IMMEDIATE", "BEGIN", query, flags=re.IGNORECASE)
+        if stripped.startswith("CREATE TABLE"):
+            query = query.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+            query = re.sub(r"\bINTEGER\b", "BIGINT", query)
+        elif stripped.startswith("ALTER TABLE"):
+            query = re.sub(r"\bINTEGER\b", "BIGINT", query)
+        query = re.sub(r"\bCURRENT_TIMESTAMP\b", "CURRENT_TIMESTAMP::text", query, flags=re.IGNORECASE)
+        return self.raw.execute(query, params)
+
+    def commit(self):
+        return self.raw.commit()
+
+    def rollback(self):
+        return self.raw.rollback()
+
+    def close(self):
+        return self.raw.close()
+
+    def __enter__(self):
+        # The pooled/lifecycle connection belongs to DatabaseManager and must
+        # remain open after schema initialization. psycopg.Connection's own
+        # context manager closes the connection on exit, unlike sqlite3's.
+        # Open a transaction for the SQLite-style `with self.connection:` scopes
+        # and commit/roll back without delegating connection ownership to psycopg.
+        self.raw.execute("BEGIN")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self.raw.commit()
+        else:
+            self.raw.rollback()
+        return False
+
+
+class _NoopCursor:
+    rowcount = 0
+    def fetchone(self):
+        return None
+    def fetchall(self):
+        return []
 
 
 class GuildDatabase:
@@ -17,21 +100,30 @@ class GuildDatabase:
         guildId: int,
         defaultJoinCredits: int = 100,
         defaultServices: Iterable[tuple[str, str, int]] = (),
+        *,
+        backend: str = "sqlite",
+        connection=None,
     ) -> None:
         self.databasePath = Path(path)
         self.guildId = int(guildId)
-        self.databasePath.parent.mkdir(parents=True, exist_ok=True)
+        self.backend = str(backend).lower()
         self.databaseLock = RLock()
-        self.connection = sqlite3.connect(
-            str(self.databasePath),
-            timeout=15,
-            check_same_thread=False,
-        )
-        self.connection.row_factory = sqlite3.Row
-        with self.databaseLock:
-            self.connection.execute("PRAGMA foreign_keys = ON")
-            self.connection.execute("PRAGMA busy_timeout = 15000")
-            self.connection.execute("PRAGMA journal_mode = WAL")
+        if self.backend == "sqlite":
+            self.databasePath.parent.mkdir(parents=True, exist_ok=True)
+            self.connection = connection or sqlite3.connect(
+                str(self.databasePath), timeout=15, check_same_thread=False
+            )
+            self.connection.row_factory = sqlite3.Row
+            with self.databaseLock:
+                self.connection.execute("PRAGMA foreign_keys = ON")
+                self.connection.execute("PRAGMA busy_timeout = 15000")
+                self.connection.execute("PRAGMA journal_mode = WAL")
+        elif self.backend == "postgresql":
+            if connection is None:
+                raise ValueError("A PostgreSQL connection is required.")
+            self.connection = _PostgresDialectConnection(connection)
+        else:
+            raise ValueError("backend must be sqlite or postgresql")
         self.CreateTables()
         self.SeedDefaults(defaultJoinCredits, defaultServices)
 
@@ -48,6 +140,8 @@ class GuildDatabase:
             CREATE TABLE IF NOT EXISTS tickets (
                 ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ticket_number INTEGER,
+                ticket_sequence INTEGER,
+                channel_ticket_number INTEGER,
                 channel_id INTEGER UNIQUE,
                 guild_id INTEGER NOT NULL,
                 creator_id INTEGER NOT NULL,
@@ -69,7 +163,10 @@ class GuildDatabase:
                 price_per_helper INTEGER CHECK (price_per_helper IS NULL OR price_per_helper >= 0),
                 status TEXT NOT NULL DEFAULT 'open',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                completed_at TEXT
+                completed_at TEXT,
+                transcript_channel_id INTEGER,
+                transcript_message_id INTEGER,
+                transcript_saved INTEGER NOT NULL DEFAULT 0 CHECK (transcript_saved IN (0, 1))
             )
             """,
             """
@@ -104,19 +201,70 @@ class GuildDatabase:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS invite_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reward_credits INTEGER NOT NULL CHECK (reward_credits >= 0),
+                duration_minutes INTEGER NOT NULL CHECK (duration_minutes BETWEEN 1 AND 10080),
+                starts_at TEXT NOT NULL,
+                ends_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'ended', 'expired')),
+                started_by INTEGER NOT NULL,
+                ended_by INTEGER,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ended_at TEXT
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS invite_rewards (
+                event_id INTEGER NOT NULL,
+                invited_user_id INTEGER NOT NULL,
+                inviter_user_id INTEGER NOT NULL,
+                invite_code TEXT NOT NULL DEFAULT '',
+                reward_credits INTEGER NOT NULL CHECK (reward_credits >= 0),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (event_id, invited_user_id),
+                FOREIGN KEY (event_id) REFERENCES invite_events(event_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS scam_reports (
+                report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reporter_user_id INTEGER NOT NULL,
+                reported_user_id INTEGER NOT NULL,
+                details TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                reviewed_by INTEGER,
+                review_note TEXT
+            )
+            """,
         )
         with self.databaseLock, self.connection:
             for statement in schema:
+                if self.backend == "postgresql" and statement.lstrip().upper().startswith("CREATE TABLE"):
+                    statement = statement.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+                    statement = re.sub(r"\bINTEGER\b", "BIGINT", statement)
                 self.connection.execute(statement)
             # Add the numbered-ticket column to databases created before this feature.
-            ticketColumns = {
-                str(row["name"])
-                for row in self.connection.execute("PRAGMA table_info(tickets)").fetchall()
-            }
+            if self.backend == "sqlite":
+                ticketColumnRows = self.connection.execute("PRAGMA table_info(tickets)").fetchall()
+                ticketColumns = {str(row["name"]) for row in ticketColumnRows}
+            else:
+                ticketColumnRows = self.connection.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?",
+                    ("tickets",),
+                ).fetchall()
+                ticketColumns = {str(row["column_name"]) for row in ticketColumnRows}
             if "ticket_number" not in ticketColumns:
                 self.connection.execute("ALTER TABLE tickets ADD COLUMN ticket_number INTEGER")
 
             ticketMigrations = {
+                # NULL marks historical tickets from v0.7.0 and earlier. Their
+                # published transcript labels remain unchanged; new tickets use a
+                # global sequence from v0.7.1 onward.
+                "ticket_sequence": "ALTER TABLE tickets ADD COLUMN ticket_sequence INTEGER",
+                "channel_ticket_number": "ALTER TABLE tickets ADD COLUMN channel_ticket_number INTEGER",
                 "active_helper_ids": "ALTER TABLE tickets ADD COLUMN active_helper_ids TEXT NOT NULL DEFAULT ''",
                 "resolution_type": "ALTER TABLE tickets ADD COLUMN resolution_type TEXT NOT NULL DEFAULT ''",
                 "resolution_requested_by": "ALTER TABLE tickets ADD COLUMN resolution_requested_by INTEGER",
@@ -130,11 +278,64 @@ class GuildDatabase:
                 "replacement_button_message_id": "ALTER TABLE tickets ADD COLUMN replacement_button_message_id INTEGER",
                 # NULL preserves the legacy total-price / equal-split payout policy for old tickets.
                 "price_per_helper": "ALTER TABLE tickets ADD COLUMN price_per_helper INTEGER",
+                "transcript_channel_id": "ALTER TABLE tickets ADD COLUMN transcript_channel_id INTEGER",
+                "transcript_message_id": "ALTER TABLE tickets ADD COLUMN transcript_message_id INTEGER",
+                "transcript_saved": "ALTER TABLE tickets ADD COLUMN transcript_saved INTEGER NOT NULL DEFAULT 0",
             }
             for columnName, migrationSql in ticketMigrations.items():
                 if columnName not in ticketColumns:
                     self.connection.execute(migrationSql)
-            # For legacy pending proposals, requester intent is the first approval.
+
+            # Preserve evidence that a transcript was successfully published even
+            # after its Discord message falls outside the 100-message retention
+            # window and its message pointer is cleared.
+            self.connection.execute(
+                "UPDATE tickets SET transcript_saved = 1 "
+                "WHERE transcript_message_id IS NOT NULL AND transcript_saved = 0"
+            )
+
+            # Seed a persistent, never-wrapping ticket counter. Use the largest
+            # historical identifier/number so old cycling labels can coexist with
+            # new globally unique suffixes while their already-posted transcripts
+            # retain their original labels.
+            highWaterRow = self.connection.execute(
+                "SELECT COUNT(*) AS row_count, COALESCE(MAX(ticket_id), 0) AS max_ticket_id, "
+                "COALESCE(MAX(ticket_number), 0) AS max_ticket_number, "
+                "COALESCE(MAX(ticket_sequence), 0) AS max_ticket_sequence FROM tickets"
+            ).fetchone()
+            highWater = max(
+                int(highWaterRow["row_count"] or 0),
+                int(highWaterRow["max_ticket_id"] or 0),
+                int(highWaterRow["max_ticket_number"] or 0),
+                int(highWaterRow["max_ticket_sequence"] or 0),
+            )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO settings(setting_key, setting_value) VALUES ('next_ticket_sequence', ?)",
+                (str(highWater + 1),),
+            )
+            currentSequenceRow = self.connection.execute(
+                "SELECT setting_value FROM settings WHERE setting_key = 'next_ticket_sequence'"
+            ).fetchone()
+            try:
+                currentSequence = int(currentSequenceRow["setting_value"])
+            except (TypeError, ValueError, KeyError):
+                currentSequence = highWater + 1
+            if currentSequence <= highWater or currentSequence < 1:
+                self.connection.execute(
+                    "UPDATE settings SET setting_value = ?, updated_at = CURRENT_TIMESTAMP WHERE setting_key = 'next_ticket_sequence'",
+                    (str(highWater + 1),),
+                )
+
+            # Channel numbers are reusable after the server has no open tickets.
+            # Seed above historical numbers on upgrade so old active channel labels
+            # cannot collide with new labels during the transition. The allocator
+            # resets to 1 once it observes that no ticket is open.
+            self.connection.execute(
+                "INSERT OR IGNORE INTO settings(setting_key, setting_value) VALUES ('next_ticket_channel_number', ?)",
+                (str(highWater + 1),),
+            )
+
+            # For legacy pending proposals, preserve the recorded proposer as the first approval.
             self.connection.execute(
                 "UPDATE tickets SET resolution_confirmations = CAST(resolution_requested_by AS TEXT) "
                 "WHERE resolution_type IN ('complete', 'cancel') "
@@ -157,10 +358,15 @@ class GuildDatabase:
 
             # Migrate existing transaction tables safely to include adjustment auditing
             # and interaction-level idempotency. Existing rows receive NULL defaults.
-            transactionColumns = {
-                str(row["name"])
-                for row in self.connection.execute("PRAGMA table_info(transactions)").fetchall()
-            }
+            if self.backend == "sqlite":
+                transactionColumnRows = self.connection.execute("PRAGMA table_info(transactions)").fetchall()
+                transactionColumns = {str(row["name"]) for row in transactionColumnRows}
+            else:
+                transactionColumnRows = self.connection.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?",
+                    ("transactions",),
+                ).fetchall()
+                transactionColumns = {str(row["column_name"]) for row in transactionColumnRows}
             transactionMigrations = {
                 "actor_user_id": "ALTER TABLE transactions ADD COLUMN actor_user_id INTEGER",
                 "note": "ALTER TABLE transactions ADD COLUMN note TEXT",
@@ -176,10 +382,14 @@ class GuildDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)",
                 "CREATE INDEX IF NOT EXISTS idx_transactions_ticket ON transactions(ticket_id)",
                 "CREATE INDEX IF NOT EXISTS idx_tickets_status_number ON tickets(status, ticket_number)",
-                # A number can be reused after all tickets close, but two currently
-                # open tickets in the same guild must never share a number.
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_tickets_sequence "
+                "ON tickets(ticket_sequence) WHERE ticket_sequence IS NOT NULL",
+                # Legacy wrapped numbers may repeat among closed records. New v0.7.1
+                # ticket_number values are global, never-wrapping sequence numbers.
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_tickets_open_number "
                 "ON tickets(ticket_number) WHERE status = 'open' AND ticket_number IS NOT NULL",
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_tickets_open_channel_number "
+                "ON tickets(channel_ticket_number) WHERE status = 'open' AND channel_ticket_number IS NOT NULL",
                 # Defensive database-level guards in addition to ticket status checks.
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_transactions_ticket_reservation "
                 "ON transactions(ticket_id) WHERE ticket_id IS NOT NULL AND type = 'ticket_reservation'",
@@ -221,6 +431,8 @@ class GuildDatabase:
                 "help_center_message_id": "",
                 "dashboard_channel_id": "",
                 "dashboard_message_id": "",
+                "audit_log_channel_id": "",
+                "ticket_welcome_message": DEFAULT_TICKET_WELCOME_MESSAGE,
             }
             for settingKey, settingValue in settingDefaults.items():
                 self.connection.execute(
@@ -369,7 +581,7 @@ class GuildDatabase:
         if isinstance(credits, bool) or int(credits) < 0:
             raise ValueError("Starting credits must be a non-negative integer")
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 created = self._EnsureUserWithinTransaction(int(userId), int(credits))
                 self.connection.commit()
@@ -427,7 +639,7 @@ class GuildDatabase:
             transactionType = f"admin_{direction}"
 
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 if normalizedKey is not None:
                     existing = self.connection.execute(
@@ -546,48 +758,84 @@ class GuildDatabase:
 
     # ----- Ticket lifecycle: each financial transition is atomic -----
 
-    def _AllocateTicketNumberWithinTransaction(self) -> int:
-        """Allocate a channel number; restart at 001 only when no tickets are open.
+    def _AllocateTranscriptSequenceWithinTransaction(self) -> int:
+        """Allocate a never-reused per-server sequence for transcript identifiers.
 
-        Caller must hold databaseLock and have an active SQLite write transaction.
-        The persisted next number prevents reusing a closed number while another
-        ticket in the current active batch is still open.
+        Caller must hold databaseLock and an active write transaction.
         """
-        openCountRow = self.connection.execute(
-            "SELECT COUNT(*) AS ticket_count FROM tickets WHERE status = 'open'"
+        self.connection.execute(
+            "INSERT OR IGNORE INTO settings(setting_key, setting_value) VALUES ('next_ticket_sequence', '1')"
+        )
+        nextSequenceSql = "SELECT setting_value FROM settings WHERE setting_key = 'next_ticket_sequence'"
+        if self.backend == "postgresql":
+            nextSequenceSql += " FOR UPDATE"
+        nextRow = self.connection.execute(nextSequenceSql).fetchone()
+        try:
+            configuredNext = int(nextRow["setting_value"]) if nextRow else 1
+        except (TypeError, ValueError):
+            configuredNext = 1
+
+        highWaterRow = self.connection.execute(
+            "SELECT COALESCE(MAX(ticket_number), 0) AS max_ticket_number, "
+            "COALESCE(MAX(ticket_sequence), 0) AS max_ticket_sequence FROM tickets"
         ).fetchone()
-        openCount = int(openCountRow["ticket_count"])
-
-        if openCount == 0:
-            ticketNumber = 1
-        else:
-            nextRow = self.connection.execute(
-                "SELECT setting_value FROM settings WHERE setting_key = 'next_ticket_number'"
-            ).fetchone()
-            try:
-                configuredNext = int(nextRow["setting_value"]) if nextRow else 1
-            except (TypeError, ValueError):
-                configuredNext = 1
-
-            maxRow = self.connection.execute(
-                "SELECT MAX(ticket_number) AS max_number FROM tickets "
-                "WHERE status = 'open'"
-            ).fetchone()
-            maxOpenNumber = int(maxRow["max_number"] or 0)
-            # Legacy username-based tickets may have NULL ticket_number values.
-            # They do not occupy a numbered channel name, so don't skip 001 solely
-            # because an old, unnumbered ticket is still open.
-            ticketNumber = max(configuredNext, maxOpenNumber + 1)
-
+        highWater = max(
+            int(highWaterRow["max_ticket_number"] or 0),
+            int(highWaterRow["max_ticket_sequence"] or 0),
+        )
+        sequence = max(1, configuredNext, highWater + 1)
         self.connection.execute(
             """INSERT INTO settings(setting_key, setting_value, updated_at)
-               VALUES ('next_ticket_number', ?, CURRENT_TIMESTAMP)
+               VALUES ('next_ticket_sequence', ?, CURRENT_TIMESTAMP)
                ON CONFLICT(setting_key) DO UPDATE SET
                  setting_value = excluded.setting_value,
                  updated_at = CURRENT_TIMESTAMP""",
-            (str(ticketNumber + 1),),
+            (str(sequence + 1),),
         )
-        return ticketNumber
+        return sequence
+
+    def _AllocateTicketChannelNumberWithinTransaction(self) -> int:
+        """Choose a channel label that is unused by active tickets in this guild.
+
+        Ticket channel numbers restart at 1 whenever no tickets are open. When
+        other tickets remain open, allocation continues forward and skips any
+        number already used by an open ticket. Caller holds the write transaction.
+        """
+        self.connection.execute(
+            "INSERT OR IGNORE INTO settings(setting_key, setting_value) VALUES ('next_ticket_channel_number', '1')"
+        )
+        nextNumberSql = "SELECT setting_value FROM settings WHERE setting_key = 'next_ticket_channel_number'"
+        if self.backend == "postgresql":
+            nextNumberSql += " FOR UPDATE"
+        nextRow = self.connection.execute(nextNumberSql).fetchone()
+        try:
+            candidate = max(1, int(nextRow["setting_value"]) if nextRow else 1)
+        except (TypeError, ValueError):
+            candidate = 1
+
+        openRows = self.connection.execute(
+            "SELECT COALESCE(channel_ticket_number, ticket_number) AS active_number "
+            "FROM tickets WHERE status = 'open'"
+        ).fetchall()
+        openNumbers = {
+            int(row["active_number"])
+            for row in openRows
+            if row["active_number"] is not None and int(row["active_number"]) > 0
+        }
+        if not openNumbers:
+            candidate = 1
+        while candidate in openNumbers:
+            candidate += 1
+
+        self.connection.execute(
+            """INSERT INTO settings(setting_key, setting_value, updated_at)
+               VALUES ('next_ticket_channel_number', ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(setting_key) DO UPDATE SET
+                 setting_value = excluded.setting_value,
+                 updated_at = CURRENT_TIMESTAMP""",
+            (str(candidate + 1),),
+        )
+        return candidate
 
     def ReserveTicket(
         self,
@@ -642,7 +890,7 @@ class GuildDatabase:
             )
 
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 defaultCredits = self.GetDefaultJoinCredits()
                 self._EnsureUserWithinTransaction(normalizedCreatorId, defaultCredits)
@@ -657,26 +905,27 @@ class GuildDatabase:
                     self.connection.rollback()
                     return None
 
-                ticketNumber = self._AllocateTicketNumberWithinTransaction()
-                ticketCursor = self.connection.execute(
-                    """INSERT INTO tickets
-                       (ticket_number, channel_id, guild_id, creator_id, event_key, helper_ids,
+                ticketSequence = self._AllocateTranscriptSequenceWithinTransaction()
+                ticketNumber = ticketSequence  # Retained as the historical/global numeric identifier.
+                channelTicketNumber = self._AllocateTicketChannelNumberWithinTransaction()
+                ticketInsertSql = """INSERT INTO tickets
+                       (ticket_number, ticket_sequence, channel_ticket_number, channel_id, guild_id, creator_id, event_key, helper_ids,
                         active_helper_ids, required_credits, reserved_credits, price_per_helper, status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')"""
+                if self.backend == "postgresql":
+                    ticketInsertSql += " RETURNING ticket_id"
+                ticketCursor = self.connection.execute(
+                    ticketInsertSql,
                     (
-                        ticketNumber,
-                        normalizedChannelId,
-                        self.guildId,
-                        normalizedCreatorId,
-                        normalizedEventKey,
-                        ",".join(map(str, helpers)),
-                        ",".join(map(str, helpers)),
-                        amount,
-                        amount,
-                        normalizedUnitPrice,
+                        ticketNumber, ticketSequence, channelTicketNumber, normalizedChannelId, self.guildId,
+                        normalizedCreatorId, normalizedEventKey, ",".join(map(str, helpers)),
+                        ",".join(map(str, helpers)), amount, amount, normalizedUnitPrice,
                     ),
                 )
-                ticketId = int(ticketCursor.lastrowid)
+                if self.backend == "postgresql":
+                    ticketId = int(ticketCursor.fetchone()["ticket_id"])
+                else:
+                    ticketId = int(ticketCursor.lastrowid)
                 self.connection.execute(
                     """INSERT INTO transactions
                        (ticket_id, from_user, to_user, amount, type, actor_user_id, note)
@@ -747,12 +996,13 @@ class GuildDatabase:
             for ticket in self.ListOpenTickets()
         )
 
-    def RequestTicketResolution(self, ticketId: int, resolutionType: str, requesterId: int) -> tuple[str, list[int]]:
-        """Record a requester-proposed completion/cancellation awaiting active helper confirmations."""
+    def RequestTicketResolution(self, ticketId: int, resolutionType: str, proposerId: int) -> tuple[str, list[int]]:
+        """Record a requester- or active-helper-proposed resolution awaiting every participant's approval."""
         if resolutionType not in {"complete", "cancel"}:
             raise ValueError("resolutionType must be 'complete' or 'cancel'")
+        normalizedProposerId = int(proposerId)
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 ticket = self.connection.execute("SELECT * FROM tickets WHERE ticket_id = ?", (int(ticketId),)).fetchone()
                 if ticket is None:
@@ -761,30 +1011,38 @@ class GuildDatabase:
                 if ticket["status"] != "open":
                     self.connection.rollback()
                     return "not_open", []
-                if int(ticket["creator_id"]) != int(requesterId):
+
+                requesterId = int(ticket["creator_id"])
+                activeIds = self._ParseIdCsv(str(ticket["active_helper_ids"]))
+                if normalizedProposerId != requesterId and normalizedProposerId not in activeIds:
                     self.connection.rollback()
-                    return "not_requester", []
+                    return "not_authorized", []
                 if int(ticket["resolution_locked"] or 0):
                     self.connection.rollback()
                     return "processing", []
                 if int(ticket["replacement_requested"] or 0):
                     self.connection.rollback()
-                    return "replacement_pending", self._ParseIdCsv(str(ticket["active_helper_ids"]))
+                    return "replacement_pending", activeIds
                 if str(ticket["resolution_type"] or "") in {"complete", "cancel"}:
                     self.connection.rollback()
-                    return "existing_request", self._ParseIdCsv(str(ticket["active_helper_ids"]))
-                activeText = str(ticket["active_helper_ids"])
-                activeIds = self._ParseIdCsv(activeText)
+                    return "existing_request", activeIds
                 if not activeIds:
                     self.connection.rollback()
                     return "no_active_helpers", []
+
+                proposerRole = "requester" if normalizedProposerId == requesterId else "active helper"
                 self.connection.execute(
                     "UPDATE tickets SET resolution_type = ?, resolution_requested_by = ?, resolution_confirmations = ?, resolution_requested_at = CURRENT_TIMESTAMP, resolution_message_id = NULL, resolution_locked = 0 WHERE ticket_id = ? AND status = 'open'",
-                    (resolutionType, int(requesterId), str(int(requesterId)), int(ticketId)),
+                    (resolutionType, normalizedProposerId, str(normalizedProposerId), int(ticketId)),
                 )
                 self.connection.execute(
                     "INSERT INTO transactions(ticket_id, from_user, to_user, amount, type, actor_user_id, note) VALUES (?, NULL, NULL, 0, ?, ?, ?)",
-                    (int(ticketId), "ticket_completion_requested" if resolutionType == "complete" else "ticket_cancellation_requested", int(requesterId), f"requester proposed {resolutionType}; requester counts as first approval and all active helpers must confirm"),
+                    (
+                        int(ticketId),
+                        "ticket_completion_requested" if resolutionType == "complete" else "ticket_cancellation_requested",
+                        normalizedProposerId,
+                        f"{proposerRole} proposed {resolutionType}; proposer counts as the first approval and the requester plus all active helpers must approve",
+                    ),
                 )
                 self.connection.commit()
                 return "requested", activeIds
@@ -813,9 +1071,9 @@ class GuildDatabase:
         )
 
     def ConfirmTicketResolution(self, ticketId: int, helperId: int) -> tuple[str, int, int, str | None]:
-        """Record one active helper approval; requester intent counts as the first approval."""
+        """Record approval from the requester or an active helper for a pending resolution."""
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 ticket = self.connection.execute("SELECT * FROM tickets WHERE ticket_id = ?", (int(ticketId),)).fetchone()
                 if ticket is None:
@@ -832,10 +1090,14 @@ class GuildDatabase:
                 requesterId = int(ticket["creator_id"])
                 requiredIds = list(dict.fromkeys([requesterId, *activeIds]))
                 requiredCount = len(requiredIds)
+                normalizedActorId = int(helperId)
+                if normalizedActorId not in requiredIds:
+                    self.connection.rollback()
+                    return "not_participant", 0, requiredCount, resolutionType
                 if int(ticket["resolution_locked"] or 0):
                     confirmations = self._ParseIdCsv(str(ticket["resolution_confirmations"] or ""))
                     self.connection.rollback()
-                    return ("duplicate" if int(helperId) in confirmations else "processing"), len(set(confirmations) & set(requiredIds)), requiredCount, resolutionType
+                    return ("duplicate" if normalizedActorId in confirmations else "processing"), len(set(confirmations) & set(requiredIds)), requiredCount, resolutionType
                 requestedAt = ticket["resolution_requested_at"]
                 expiredRow = self.connection.execute(
                     "SELECT CASE WHEN ? IS NULL OR datetime(?) <= datetime('now', '-15 minutes') THEN 1 ELSE 0 END AS expired",
@@ -848,24 +1110,27 @@ class GuildDatabase:
                     )
                     self.connection.commit()
                     return "expired", 0, 0, resolutionType
-                if int(helperId) not in activeIds:
-                    self.connection.rollback()
-                    return "not_active_helper", 0, requiredCount, resolutionType
                 confirmations = self._ParseIdCsv(str(ticket["resolution_confirmations"] or ""))
-                if requesterId not in confirmations:
-                    confirmations.insert(0, requesterId)
-                if int(helperId) in confirmations:
+                proposerId = int(ticket["resolution_requested_by"] or requesterId)
+                if proposerId not in confirmations:
+                    confirmations.insert(0, proposerId)
+                if normalizedActorId in confirmations:
                     self.connection.rollback()
                     return "duplicate", len(set(confirmations) & set(requiredIds)), requiredCount, resolutionType
-                confirmations.append(int(helperId))
+                confirmations.append(normalizedActorId)
                 isReady = set(confirmations) >= set(requiredIds)
                 self.connection.execute(
                     "UPDATE tickets SET resolution_confirmations = ?, resolution_locked = ? WHERE ticket_id = ? AND status = 'open'",
                     (",".join(map(str, confirmations)), 1 if isReady else 0, int(ticketId)),
                 )
                 self.connection.execute(
-                    "INSERT INTO transactions(ticket_id, from_user, to_user, amount, type, actor_user_id, note) VALUES (?, NULL, NULL, 0, 'helper_confirmation', ?, ?)",
-                    (int(ticketId), int(helperId), f"helper confirmed proposed {resolutionType}"),
+                    "INSERT INTO transactions(ticket_id, from_user, to_user, amount, type, actor_user_id, note) VALUES (?, NULL, NULL, 0, ?, ?, ?)",
+                    (
+                        int(ticketId),
+                        "helper_confirmation" if int(helperId) in activeIds else "requester_confirmation",
+                        int(helperId),
+                        f"{'helper' if int(helperId) in activeIds else 'requester'} confirmed proposed {resolutionType}",
+                    ),
                 )
                 self.connection.commit()
                 result = "ready" if isReady else "confirmed"
@@ -878,7 +1143,7 @@ class GuildDatabase:
         """Expire stale helper-confirmation proposals atomically and return ticket locations."""
         ageMinutes = max(1, min(int(ageMinutes), 1440))
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 rows = self.connection.execute(
                     "SELECT ticket_id, channel_id, resolution_type, resolution_message_id FROM tickets "
@@ -916,9 +1181,9 @@ class GuildDatabase:
                 raise
 
     def RejectTicketResolution(self, ticketId: int, helperId: int) -> tuple[str, str | None]:
-        """Allow an active helper to reject a proposal; staff override remains available."""
+        """Allow the requester or an active helper to veto a proposal; staff override remains available."""
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 ticket = self.connection.execute("SELECT * FROM tickets WHERE ticket_id = ?", (int(ticketId),)).fetchone()
                 if ticket is None:
@@ -935,16 +1200,24 @@ class GuildDatabase:
                     self.connection.rollback()
                     return "already_confirmed", resolutionType
                 activeIds = self._ParseIdCsv(str(ticket["active_helper_ids"]))
-                if int(helperId) not in activeIds:
+                requesterId = int(ticket["creator_id"])
+                normalizedActorId = int(helperId)
+                if normalizedActorId != requesterId and normalizedActorId not in activeIds:
                     self.connection.rollback()
-                    return "not_active_helper", resolutionType
+                    return "not_participant", resolutionType
                 self.connection.execute(
                     "UPDATE tickets SET resolution_type = '', resolution_requested_by = NULL, resolution_confirmations = '', resolution_requested_at = NULL, resolution_message_id = NULL, resolution_locked = 0 WHERE ticket_id = ? AND status = 'open'",
                     (int(ticketId),),
                 )
+                actorRole = "helper" if normalizedActorId in activeIds else "requester"
                 self.connection.execute(
-                    "INSERT INTO transactions(ticket_id, from_user, to_user, amount, type, actor_user_id, note) VALUES (?, NULL, NULL, 0, 'helper_rejected_resolution', ?, ?)",
-                    (int(ticketId), int(helperId), f"helper rejected proposed {resolutionType}"),
+                    "INSERT INTO transactions(ticket_id, from_user, to_user, amount, type, actor_user_id, note) VALUES (?, NULL, NULL, 0, ?, ?, ?)",
+                    (
+                        int(ticketId),
+                        "helper_rejected_resolution" if actorRole == "helper" else "requester_rejected_resolution",
+                        normalizedActorId,
+                        f"{actorRole} rejected proposed {resolutionType}",
+                    ),
                 )
                 self.connection.commit()
                 return "rejected", resolutionType
@@ -955,7 +1228,7 @@ class GuildDatabase:
     def LeaveTicketHelper(self, ticketId: int, helperId: int) -> tuple[str, list[int], int]:
         """Remove an active helper from the roster and audit the departure."""
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 ticket = self.connection.execute("SELECT * FROM tickets WHERE ticket_id = ?", (int(ticketId),)).fetchone()
                 if ticket is None:
@@ -990,7 +1263,7 @@ class GuildDatabase:
     def RequestHelperReplacement(self, ticketId: int, requesterId: int) -> tuple[str, int, int]:
         """Legacy DB API retained for older tests; current Discord UI uses candidate selection."""
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 ticket = self.connection.execute("SELECT * FROM tickets WHERE ticket_id = ?", (int(ticketId),)).fetchone()
                 if ticket is None:
@@ -1050,7 +1323,7 @@ class GuildDatabase:
             return "invalid_candidates", 0, 0, 0
 
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 ticket = self.connection.execute("SELECT * FROM tickets WHERE ticket_id = ?", (int(ticketId),)).fetchone()
                 if ticket is None:
@@ -1123,7 +1396,7 @@ class GuildDatabase:
         """Atomically apply exactly the candidates previously selected by the requester."""
         expected = list(dict.fromkeys(int(item) for item in expectedCandidateIds)) if expectedCandidateIds is not None else None
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 ticket = self.connection.execute("SELECT * FROM tickets WHERE ticket_id = ?", (int(ticketId),)).fetchone()
                 if ticket is None:
@@ -1179,7 +1452,7 @@ class GuildDatabase:
     def DisapproveReplacementRequest(self, ticketId: int, actorUserId: int) -> tuple[str, list[int]]:
         """Reject the selected replacement candidates without changing the active roster."""
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 ticket = self.connection.execute("SELECT * FROM tickets WHERE ticket_id = ?", (int(ticketId),)).fetchone()
                 if ticket is None:
@@ -1213,7 +1486,7 @@ class GuildDatabase:
     def AddReplacementHelper(self, ticketId: int, helperId: int, actorUserId: int) -> tuple[str, list[int]]:
         """Add one staff-approved replacement using the pre-0.6.2 internal API."""
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 ticket = self.connection.execute("SELECT * FROM tickets WHERE ticket_id = ?", (int(ticketId),)).fetchone()
                 if ticket is None:
@@ -1273,7 +1546,7 @@ class GuildDatabase:
         """Complete an open ticket and pay helpers exactly once, atomically."""
         normalizedTicketId = int(ticketId)
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 ticket = self.connection.execute(
                     "SELECT * FROM tickets WHERE ticket_id = ?", (normalizedTicketId,)
@@ -1397,7 +1670,7 @@ class GuildDatabase:
         """Refund the requester's reservation exactly once, atomically."""
         normalizedTicketId = int(ticketId)
         with self.databaseLock:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
                 ticket = self.connection.execute(
                     "SELECT * FROM tickets WHERE ticket_id = ?", (normalizedTicketId,)
@@ -1456,6 +1729,257 @@ class GuildDatabase:
             fetchOne=True,
         )
         return int(row["refund_amount"] or 0) if row else 0
+
+    # ----- Audit routing, ticket history, reports, and invite reward events -----
+
+    def SetTicketTranscriptMessage(self, ticketId: int, channelId: int, messageId: int) -> None:
+        self.Execute(
+            "UPDATE tickets SET transcript_channel_id = ?, transcript_message_id = ?, transcript_saved = 1 WHERE ticket_id = ?",
+            (int(channelId), int(messageId), int(ticketId)),
+        )
+
+    def ClearTicketTranscriptMessage(self, ticketId: int) -> None:
+        # Clear only the live Discord message pointer. transcript_saved records
+        # that this ticket once had a successfully stored transcript and remains
+        # true when the Discord post is pruned by retention.
+        self.Execute(
+            "UPDATE tickets SET transcript_channel_id = NULL, transcript_message_id = NULL WHERE ticket_id = ?",
+            (int(ticketId),),
+        )
+
+    def PruneTicketHistory(self, maxRecords: int = 500) -> int:
+        """Keep only the newest ``maxRecords`` closed tickets with saved transcripts.
+
+        Open tickets are never pruned. Closed records whose transcript was never
+        confirmed are also retained for recovery. Transactions associated with
+        removed ticket-history rows are deleted first to satisfy the database
+        foreign key; user balances and standalone credit adjustments are kept.
+        Returns the number of ticket rows removed.
+        """
+        safeLimit = max(1, min(5000, int(maxRecords)))
+        with self.databaseLock:
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
+            try:
+                if self.backend == "sqlite":
+                    candidateSql = (
+                        "SELECT ticket_id FROM tickets "
+                        "WHERE status <> 'open' AND transcript_saved = 1 "
+                        "ORDER BY ticket_id DESC LIMIT -1 OFFSET ?"
+                    )
+                else:
+                    candidateSql = (
+                        "SELECT ticket_id FROM tickets "
+                        "WHERE status <> 'open' AND transcript_saved = 1 "
+                        "ORDER BY ticket_id DESC OFFSET ?"
+                    )
+                rows = self.connection.execute(candidateSql, (safeLimit,)).fetchall()
+                ticketIds = [int(row["ticket_id"]) for row in rows]
+                for start in range(0, len(ticketIds), 400):
+                    batch = ticketIds[start:start + 400]
+                    placeholders = ",".join("?" for _ in batch)
+                    params = tuple(batch)
+                    self.connection.execute(
+                        f"DELETE FROM transactions WHERE ticket_id IN ({placeholders})", params
+                    )
+                    self.connection.execute(
+                        f"DELETE FROM tickets WHERE ticket_id IN ({placeholders}) "
+                        "AND status <> 'open' AND transcript_saved = 1", params
+                    )
+                self.connection.commit()
+                return len(ticketIds)
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def ListTicketHistoryForMember(self, userId: int, limit: int = 10) -> list[sqlite3.Row]:
+        normalizedId = int(userId)
+        safeLimit = max(1, min(25, int(limit)))
+        token = str(normalizedId)
+        return self.Execute(
+            """SELECT * FROM tickets
+               WHERE creator_id = ?
+                  OR (',' || helper_ids || ',') LIKE ('%,' || ? || ',%')
+                  OR (',' || active_helper_ids || ',') LIKE ('%,' || ? || ',%')
+                  OR (',' || replacement_candidate_ids || ',') LIKE ('%,' || ? || ',%')
+               ORDER BY ticket_id DESC LIMIT ?""",
+            (normalizedId, token, token, token, safeLimit), fetchAll=True,
+        )
+
+    def CreateScamReport(self, reporterUserId: int, reportedUserId: int, details: str) -> int:
+        details = str(details).strip()[:3000]
+        if not details:
+            raise ValueError("Report details cannot be empty.")
+        if int(reporterUserId) == int(reportedUserId):
+            raise ValueError("You cannot report yourself.")
+        with self.databaseLock:
+            reportSql = "INSERT INTO scam_reports(reporter_user_id, reported_user_id, details) VALUES (?, ?, ?)"
+            if self.backend == "postgresql":
+                reportSql += " RETURNING report_id"
+            cursor = self.connection.execute(
+                reportSql, (int(reporterUserId), int(reportedUserId), details),
+            )
+            reportId = int(cursor.fetchone()["report_id"]) if self.backend == "postgresql" else int(cursor.lastrowid)
+            self.connection.commit()
+            return reportId
+
+    def ListScamReports(self, *, status: str | None = "open", limit: int = 10):
+        safeLimit = max(1, min(25, int(limit)))
+        if status is None or status == "all":
+            return self.Execute(
+                "SELECT * FROM scam_reports ORDER BY report_id DESC LIMIT ?",
+                (safeLimit,), fetchAll=True,
+            )
+        return self.Execute(
+            "SELECT * FROM scam_reports WHERE status = ? ORDER BY report_id DESC LIMIT ?",
+            (str(status), safeLimit), fetchAll=True,
+        )
+
+    def ResolveScamReport(self, reportId: int, reviewedBy: int, decision: str, note: str = "") -> bool:
+        normalizedDecision = str(decision).strip().lower()
+        if normalizedDecision not in {"confirmed", "dismissed"}:
+            raise ValueError("decision must be 'confirmed' or 'dismissed'.")
+        with self.databaseLock:
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
+            try:
+                cursor = self.connection.execute(
+                    "UPDATE scam_reports SET status = ?, reviewed_by = ?, review_note = ? "
+                    "WHERE report_id = ? AND status = 'open'",
+                    (normalizedDecision, int(reviewedBy), str(note).strip()[:1000] or None, int(reportId)),
+                )
+                self.connection.commit()
+                return cursor.rowcount == 1
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def StartInviteEvent(self, rewardCredits: int, durationMinutes: int, startedBy: int) -> tuple[str, int | None, str | None]:
+        import datetime as _datetime
+        reward = int(rewardCredits)
+        duration = int(durationMinutes)
+        if reward < 0 or reward > 1_000_000_000:
+            raise ValueError("Reward must be between 0 and 1,000,000,000 credits.")
+        if not 1 <= duration <= 10_080:
+            raise ValueError("Duration must be between 1 minute and 7 days.")
+        now = _datetime.datetime.now(_datetime.timezone.utc).replace(microsecond=0)
+        startsAt = now.isoformat()
+        endsAt = (now + _datetime.timedelta(minutes=duration)).isoformat()
+        with self.databaseLock:
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
+            try:
+                active = self.connection.execute(
+                    "SELECT event_id FROM invite_events WHERE status = 'active' LIMIT 1"
+                ).fetchone()
+                if active is not None:
+                    self.connection.rollback()
+                    return "already_active", int(active["event_id"]), None
+                eventSql = "INSERT INTO invite_events(reward_credits, duration_minutes, starts_at, ends_at, status, started_by) VALUES (?, ?, ?, ?, 'active', ?)"
+                if self.backend == "postgresql":
+                    eventSql += " RETURNING event_id"
+                cursor = self.connection.execute(eventSql, (reward, duration, startsAt, endsAt, int(startedBy)))
+                eventId = int(cursor.fetchone()["event_id"]) if self.backend == "postgresql" else int(cursor.lastrowid)
+                for settingKey, settingValue in (
+                    ("invite_reward_credits", str(reward)),
+                    ("invite_duration_minutes", str(duration)),
+                ):
+                    self.connection.execute(
+                        """INSERT INTO settings(setting_key, setting_value, updated_at)
+                           VALUES (?, ?, CURRENT_TIMESTAMP)
+                           ON CONFLICT(setting_key) DO UPDATE SET
+                             setting_value = excluded.setting_value,
+                             updated_at = CURRENT_TIMESTAMP""",
+                        (settingKey, settingValue),
+                    )
+                self.connection.commit()
+                return "started", eventId, endsAt
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def GetActiveInviteEvent(self):
+        return self.Execute(
+            "SELECT * FROM invite_events WHERE status = 'active' ORDER BY event_id DESC LIMIT 1",
+            fetchOne=True,
+        )
+
+    def EndInviteEvent(self, endedBy: int | None = None, *, expired: bool = False) -> tuple[str, object | None]:
+        import datetime as _datetime
+        with self.databaseLock:
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
+            try:
+                event = self.connection.execute(
+                    "SELECT * FROM invite_events WHERE status = 'active' ORDER BY event_id DESC LIMIT 1"
+                ).fetchone()
+                if event is None:
+                    self.connection.rollback()
+                    return "none_active", None
+                status = "expired" if expired else "ended"
+                endedAt = _datetime.datetime.now(_datetime.timezone.utc).replace(microsecond=0).isoformat()
+                self.connection.execute(
+                    "UPDATE invite_events SET status = ?, ended_by = ?, ended_at = ? WHERE event_id = ? AND status = 'active'",
+                    (status, int(endedBy) if endedBy is not None else None, endedAt, int(event["event_id"])),
+                )
+                self.connection.commit()
+                # Return an immutable-friendly copy for callers after the commit.
+                return status, dict(event)
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def ExpireInviteEventIfDue(self) -> object | None:
+        import datetime as _datetime
+        nowText = _datetime.datetime.now(_datetime.timezone.utc).replace(microsecond=0).isoformat()
+        event = self.GetActiveInviteEvent()
+        if event is None or str(event["ends_at"]) > nowText:
+            return None
+        status, ended = self.EndInviteEvent(expired=True)
+        return ended if status == "expired" else None
+
+    def AwardInviteReward(self, eventId: int, invitedUserId: int, inviterUserId: int, inviteCode: str) -> tuple[str, int | None, int]:
+        """Atomically award an inviter once per invite event / joining member."""
+        import datetime as _datetime
+        nowText = _datetime.datetime.now(_datetime.timezone.utc).replace(microsecond=0).isoformat()
+        with self.databaseLock:
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
+            try:
+                event = self.connection.execute(
+                    "SELECT * FROM invite_events WHERE event_id = ? AND status = 'active'",
+                    (int(eventId),),
+                ).fetchone()
+                if event is None or str(event["ends_at"]) <= nowText:
+                    self.connection.rollback()
+                    return "inactive", None, 0
+                if int(invitedUserId) == int(inviterUserId):
+                    self.connection.rollback()
+                    return "self_invite", None, 0
+                reward = int(event["reward_credits"])
+                self._EnsureUserWithinTransaction(int(inviterUserId), self.GetDefaultJoinCredits())
+                self._EnsureUserWithinTransaction(int(invitedUserId), self.GetDefaultJoinCredits())
+                cursor = self.connection.execute(
+                    """INSERT INTO invite_rewards(event_id, invited_user_id, inviter_user_id, invite_code, reward_credits)
+                       VALUES (?, ?, ?, ?, ?) ON CONFLICT(event_id, invited_user_id) DO NOTHING""",
+                    (int(eventId), int(invitedUserId), int(inviterUserId), str(inviteCode)[:100], reward),
+                )
+                if cursor.rowcount != 1:
+                    self.connection.rollback()
+                    return "duplicate", None, reward
+                self.connection.execute(
+                    "UPDATE users SET credits = credits + ? WHERE user_id = ?",
+                    (reward, int(inviterUserId)),
+                )
+                self.connection.execute(
+                    """INSERT INTO transactions(ticket_id, from_user, to_user, amount, type, actor_user_id, note)
+                       VALUES (NULL, NULL, ?, ?, 'invite_reward', NULL, ?)""",
+                    (int(inviterUserId), reward, f"Invite event #{int(eventId)}: invited member {int(invitedUserId)} via {str(inviteCode)[:80]}"),
+                )
+                row = self.connection.execute(
+                    "SELECT credits FROM users WHERE user_id = ?", (int(inviterUserId),)
+                ).fetchone()
+                balance = int(row["credits"])
+                self.connection.commit()
+                return "awarded", balance, reward
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def Close(self) -> None:
         with self.databaseLock:

@@ -15,3 +15,5 @@
 Required Python, unittest, and Discord framework hooks retain their required spellings, including `__init__`, `callback`, `setup_hook`, `close`, Discord event names, and unittest lifecycle methods.
 
 This is the project's established house style. It intentionally differs from the Python community's usual preference for `snake_case` function and variable names, so follow the project convention for consistency when contributing.
+
+- Ticket display identifiers: active channel number and permanent transcript sequence are separate; use the shared helpers in `ticket_numbers.py`, not inline formatting. Transcript sequences >= 1000 use the vertical box divider `│` (e.g. `Ticket-1│000`).

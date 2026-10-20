@@ -1,12 +1,13 @@
-"""Resolve and cache one persistent SQLite database per Discord server."""
+"""Resolve and cache one persistent database per Discord server."""
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import Iterable
+from typing import Iterable, Any
 
 from .guild_database import GuildDatabase
 
@@ -31,10 +32,19 @@ class DatabaseManager:
         dataDir: str | Path,
         defaultJoinCredits: int = 100,
         defaultServices: Iterable[tuple[str, str, int]] = (),
+        *,
+        backend: str = "sqlite",
+        databaseUrl: str = "",
     ) -> None:
         self.dataDir = Path(dataDir)
         self.defaultJoinCredits = max(0, int(defaultJoinCredits))
         self.defaultServices = tuple(defaultServices)
+        self.backend = str(backend).strip().lower()
+        self.databaseUrl = str(databaseUrl or "").strip()
+        if self.backend not in {"sqlite", "postgresql"}:
+            raise ValueError("Database backend must be sqlite or postgresql.")
+        if self.backend == "postgresql" and not self.databaseUrl:
+            raise ValueError("DATABASE_URL must be configured for the PostgreSQL backend.")
         self._serverDatabases: dict[int, GuildDatabase] = {}
         self._databaseLock = RLock()
 
@@ -114,6 +124,36 @@ class DatabaseManager:
             f"{destinationPath}. Original preserved at {archiveDirectory}"
         )
 
+    def _CreatePostgresConnection(self, serverId: int):
+        """Create an isolated PostgreSQL schema per Discord server.
+
+        Existing SQL operations are passed through a small dialect adapter in
+        GuildDatabase; secrets stay in DATABASE_URL, never in source code.
+        """
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as error:
+            raise RuntimeError(
+                "PostgreSQL mode needs psycopg[binary]. Install project requirements first."
+            ) from error
+        rawConnection = psycopg.connect(
+            self.databaseUrl,
+            row_factory=dict_row,
+            autocommit=True,
+            connect_timeout=15,
+            application_name="BloxFruitsHelperCreditBot",
+        )
+        schemaName = f"server_{int(serverId)}"
+        try:
+            rawConnection.execute(f'CREATE SCHEMA IF NOT EXISTS "{schemaName}"')
+            rawConnection.execute(f'SET search_path TO "{schemaName}", public')
+            rawConnection.commit()
+        except Exception:
+            rawConnection.close()
+            raise
+        return rawConnection
+
     def ForServer(self, serverId: int | None) -> GuildDatabase:
         """Return the isolated database for a Discord server."""
         if serverId is None:
@@ -125,16 +165,30 @@ class DatabaseManager:
         with self._databaseLock:
             database = self._serverDatabases.get(normalizedId)
             if database is None:
-                databasePath = self.GetServerDatabasePath(normalizedId)
-                self._MigrateLegacyDatabase(normalizedId, databasePath)
-                database = GuildDatabase(
-                    path=databasePath,
-                    guildId=normalizedId,
-                    defaultJoinCredits=self.defaultJoinCredits,
-                    defaultServices=self.defaultServices,
-                )
+                if self.backend == "sqlite":
+                    databasePath = self.GetServerDatabasePath(normalizedId)
+                    self._MigrateLegacyDatabase(normalizedId, databasePath)
+                    database = GuildDatabase(
+                        path=databasePath,
+                        guildId=normalizedId,
+                        defaultJoinCredits=self.defaultJoinCredits,
+                        defaultServices=self.defaultServices,
+                        backend="sqlite",
+                    )
+                    location = str(databasePath)
+                else:
+                    connection = self._CreatePostgresConnection(normalizedId)
+                    database = GuildDatabase(
+                        path=self.dataDir / "remote" / str(normalizedId) / DATABASE_FILE_NAME,
+                        guildId=normalizedId,
+                        defaultJoinCredits=self.defaultJoinCredits,
+                        defaultServices=self.defaultServices,
+                        backend="postgresql",
+                        connection=connection,
+                    )
+                    location = f"PostgreSQL schema server_{normalizedId}"
                 self._serverDatabases[normalizedId] = database
-                print(f"[Database] Ready for server {normalizedId}: {databasePath}")
+                print(f"[Database] Ready for server {normalizedId}: {location}")
             return database
 
     def ForGuild(self, guildId: int | None) -> GuildDatabase:
@@ -142,7 +196,7 @@ class DatabaseManager:
         return self.ForServer(guildId)
 
     def CloseAll(self) -> None:
-        """Close all open SQLite connections cleanly."""
+        """Close all cached SQLite or PostgreSQL connections cleanly."""
         with self._databaseLock:
             for database in self._serverDatabases.values():
                 database.Close()
