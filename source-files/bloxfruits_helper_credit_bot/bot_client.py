@@ -66,6 +66,9 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
     intents = discord.Intents.default()
     intents.members = True
     intents.guilds = True
+    # Ticket transcripts must include user-authored message text. This privileged
+    # intent must also be enabled in the Discord Developer Portal for the bot.
+    intents.message_content = True
 
     databaseManager = DatabaseManager(
         dataDir=settings.projectRoot / "data",
