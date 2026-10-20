@@ -55,10 +55,8 @@ This development release separates reusable ticket-channel numbering from perman
 
 ### 7. Verification
 
-- Added tests for permanent labels through 10,000, including `1│000`, `2│000`, and `10│000`.
-- Added tests for channel-number reuse after all tickets close, collision avoidance while tickets remain open, and separation of the channel number from the permanent transcript sequence.
-- Added tests for legacy-label compatibility and plain-text welcome placeholder replacement.
-- Current local validation: **79 tests ran: 78 passed and 1 skipped** because `discord.py` is not installed in this build environment. Python source compilation passed.
+- Latest local Windows validation after Fix 1: 84 tests passed, 0 failures, 0 skipped. Python source compilation passed.
+- Live Discord, host behavior, PostgreSQL operation, and backup delivery still require acceptance testing.
 
 ### Important Testing Notes
 
