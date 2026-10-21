@@ -580,13 +580,22 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
 
     inviteEventGroup = app_commands.Group(
         name="invite-event",
-        description="Start or end timed invite reward events for this server.",
+        description="Start or end invite reward events for this server.",
     )
 
-    @inviteEventGroup.command(name="start", description="Start an invite reward event with a reward and duration.")
+    @inviteEventGroup.command(name="start", description="Start an invite reward event.")
     @app_commands.guild_only()
-    @app_commands.describe(reward_credits="Credits per eligible invite (defaults to the Admin Dashboard value)", duration_minutes="Duration in minutes, max 7 days (defaults to the Admin Dashboard value)")
-    async def StartInviteRewardEvent(interaction: discord.Interaction, reward_credits: app_commands.Range[int, 0, 1_000_000_000] | None = None, duration_minutes: app_commands.Range[int, 1, 10080] | None = None) -> None:
+    @app_commands.describe(
+        reward_credits="Credits per eligible invite (defaults to the Admin Dashboard value)",
+        duration_minutes="Duration in minutes, max 7 days (ignored if run_forever is enabled)",
+        run_forever="Keep the event active until /invite-event end is run",
+    )
+    async def StartInviteRewardEvent(
+        interaction: discord.Interaction,
+        reward_credits: app_commands.Range[int, 0, 1_000_000_000] | None = None,
+        duration_minutes: app_commands.Range[int, 1, 10080] | None = None,
+        run_forever: bool = False,
+    ) -> None:
         if interaction.guild is None or interaction.guild_id is None:
             await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
             return
@@ -606,10 +615,10 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         savedDuration = db.GetSetting("invite_duration_minutes", "60") or "60"
         try:
             rewardAmount = int(reward_credits if reward_credits is not None else savedReward)
-            durationAmount = int(duration_minutes if duration_minutes is not None else savedDuration)
+            durationAmount = None if run_forever else int(duration_minutes if duration_minutes is not None else savedDuration)
             if not 0 <= rewardAmount <= 1_000_000_000:
                 raise ValueError("Reward must be between 0 and 1,000,000,000 credits.")
-            if not 1 <= durationAmount <= 10_080:
+            if durationAmount is not None and not 1 <= durationAmount <= 10_080:
                 raise ValueError("Duration must be between 1 minute and 7 days.")
             status, eventId, endsAt = db.StartInviteEvent(rewardAmount, durationAmount, interaction.user.id)
         except Exception:
@@ -622,9 +631,17 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         embed = discord.Embed(title="🎟️ Invite reward event started", color=discord.Color.green(), timestamp=discord.utils.utcnow())
         embed.add_field(name="Event ID", value=f"#{eventId}", inline=True)
         embed.add_field(name="Reward per eligible join", value=f"{rewardAmount:,} credits", inline=True)
-        embed.add_field(name="Duration", value=f"{durationAmount} minute(s)", inline=True)
-        embed.add_field(name="Ends at (UTC)", value=str(endsAt), inline=False)
-        await SendEphemeralResponse(interaction, f"✅ Started invite reward event #{eventId}. It ends automatically at {endsAt}.", ephemeral=True)
+        embed.add_field(name="Duration", value="Until manually ended" if durationAmount is None else f"{durationAmount} minute(s)", inline=True)
+        if endsAt is not None:
+            embed.add_field(name="Ends at (UTC)", value=str(endsAt), inline=False)
+        else:
+            embed.add_field(name="End condition", value="Runs until staff uses /invite-event end.", inline=False)
+        confirmation = (
+            f"✅ Started invite reward event #{eventId}. It will keep running until staff uses **/invite-event end**."
+            if durationAmount is None
+            else f"✅ Started invite reward event #{eventId}. It ends automatically at {endsAt} UTC."
+        )
+        await SendEphemeralResponse(interaction, confirmation, ephemeral=True)
         await SendAuditLog(interaction.guild, db, embed)
         currentInvites = await FetchInviteUseCounts(interaction.guild)
         if currentInvites is not None:
