@@ -1,5 +1,6 @@
 """Tests for the named per-server database layout and safe legacy migration."""
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,6 +61,51 @@ class DatabaseLayoutMigrationTests(unittest.TestCase):
             self.assertTrue((archives[0] / "guild.sqlite3").exists())
         finally:
             manager.CloseAll()
+
+    def test_legacy_report_table_migrates_and_supports_general_reports(self):
+        databasePath = (
+            self.dataRoot / "servers" / str(self.serverId) / "blox_fruits_credit_system.sqlite3"
+        )
+        databasePath.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(databasePath) as connection:
+            connection.execute(
+                """CREATE TABLE scam_reports (
+                    report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    reporter_user_id INTEGER NOT NULL,
+                    reported_user_id INTEGER NOT NULL,
+                    details TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    reviewed_by INTEGER,
+                    review_note TEXT
+                )"""
+            )
+            connection.execute(
+                "INSERT INTO scam_reports(reporter_user_id, reported_user_id, details) VALUES (?, ?, ?)",
+                (555010, 555011, "Legacy scam report"),
+            )
+
+        database = GuildDatabase(databasePath, self.serverId, 100, DEFAULT_SERVICES)
+        try:
+            legacy = database.Execute(
+                "SELECT * FROM scam_reports WHERE report_id = 1", fetchOne=True
+            )
+            self.assertEqual(legacy["report_type"], "scam")
+
+            bugReportId = database.CreateScamReport(
+                555012,
+                None,
+                "Ticket Continue button is missing on mobile.",
+                reportType="bug",
+            )
+            bugReport = database.Execute(
+                "SELECT * FROM scam_reports WHERE report_id = ?",
+                (bugReportId,), fetchOne=True,
+            )
+            self.assertEqual(bugReport["reported_user_id"], 0)
+            self.assertEqual(bugReport["report_type"], "bug")
+        finally:
+            database.Close()
 
     def test_existing_new_and_legacy_databases_are_never_guessed_between(self):
         legacyPath = self.dataRoot / "guilds" / str(self.serverId) / "guild.sqlite3"
