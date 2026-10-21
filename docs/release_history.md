@@ -2,15 +2,25 @@
 
 This page summarizes the current development release and its user-facing changes. It is the maintained release summary linked from the root [README](../README.md). Older installation and changelog notes remain archived in [`history/releases/historical-installation-and-changelogs.zip`](history/releases/historical-installation-and-changelogs.zip); use the current documentation for current setup instructions.
 
-## Release candidate 0.9.0 — Credit debt, inviter penalties, and full audit history
+## v0.9.0 — Credit debt, inviter penalties, and full audit history
 
 Full feature inventory: [`changelog-0.9.0.md`](changelog-0.9.0.md).
 
 - Added owner-only `/penalty` with separate credit-debt tracking, debt-based service participation guards, and an owner-configurable inviter-leave penalty.
 - Expanded credit movement auditing so ticket reservations, payouts, refunds, adjustments, and applicable penalties/rewards have explicit ledger/audit entries with recorded actors and reasons where available.
-- Preserves the v0.8.0 ticket, transcript, Help Center, dashboard, invite reward, scam report, encrypted backup, and database migration workflows documented in the complete feature notes.
+- Preserves the v0.8.0 ticket, transcript, Help Center, dashboard, invite reward, reporting, encrypted backup, and database migration workflows documented in the complete feature notes.
 
-> **Acceptance status:** Package metadata and changelog are prepared for v0.9.0. Live Discord testing of the latest debt, leave-penalty, and transaction-audit workflows is still required before treating this as production-verified. The GitHub tag/release still needs to be published.
+> **Acceptance status:** v0.9.0 is published as a pre-release. Live Discord testing of debt, leave-penalty, and transaction-audit workflows is still required before treating them as production-verified.
+
+### Post-tag development changes on `main` (not included in the existing v0.9.0 tag)
+
+- Added a **Continue** button below the multi-member helper selector during ticket creation.
+- Replaced the Help Center's **Report Scam** button with **Report Issue**, including categories for scams/fraud, bugs, ticket/credit issues, member misconduct, and other concerns. Selecting a member is optional for general reports.
+- Placed report controls below the category/member selectors; report selection prompts are now removed after a report is saved or after five minutes of inactivity.
+- Replaced the staff commands with `/reports` and `/report-review` for general report listing and review.
+- Fixed the Inviter Leave Penalty modal label to comply with Discord's 45-character limit.
+
+These post-tag changes are committed to `main` but still require live Discord acceptance testing before a follow-up release.
 
 ## Hotfix 0.7.1 — Ticket numbering, transcript retention, and Discord interaction errors
 
