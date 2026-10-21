@@ -1798,9 +1798,9 @@ class GuildDatabase:
         return self.Execute(
             """SELECT * FROM tickets
                WHERE creator_id = ?
-                  OR (',' || helper_ids || ',') LIKE ('%,' || ? || ',%')
-                  OR (',' || active_helper_ids || ',') LIKE ('%,' || ? || ',%')
-                  OR (',' || replacement_candidate_ids || ',') LIKE ('%,' || ? || ',%')
+                  OR (',' || helper_ids || ',') LIKE ('%%,' || ? || ',%%')
+                  OR (',' || active_helper_ids || ',') LIKE ('%%,' || ? || ',%%')
+                  OR (',' || replacement_candidate_ids || ',') LIKE ('%%,' || ? || ',%%')
                ORDER BY ticket_id DESC LIMIT ?""",
             (normalizedId, token, token, token, safeLimit), fetchAll=True,
         )
