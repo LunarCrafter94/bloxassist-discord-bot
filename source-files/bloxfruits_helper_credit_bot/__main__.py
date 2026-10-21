@@ -33,8 +33,8 @@ def Main() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    # This bot does not use Discord voice. Suppress only the two informational
-    # warnings about absent optional voice libraries; keep all other warnings/errors.
+    # This bot does not use Discord voice. Suppress only the two optional
+    # voice-library warnings; keep all other warnings and errors visible.
     logging.getLogger("discord.client").addFilter(OptionalVoiceWarningFilter())
 
     settings = LoadRuntimeSettings()
