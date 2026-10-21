@@ -108,6 +108,33 @@ class ReportScamUserIdModal(discord.ui.Modal, title="Report by User ID"):
         )
 
 
+class ReportScamUserSelect(discord.ui.UserSelect):
+    def __init__(self, parent: "ReportScamUserSelectView"):
+        super().__init__(
+            placeholder="Choose the member you want to report",
+            min_values=1,
+            max_values=1,
+        )
+        self.parentView = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        selected = self.values[0]
+        if not isinstance(selected, discord.Member):
+            await SendEphemeralResponse(
+                interaction, "Please select a member of this server.", ephemeral=True
+            )
+            return
+        if selected.id == interaction.user.id:
+            await SendEphemeralResponse(interaction, "You cannot report yourself.", ephemeral=True)
+            return
+        if selected.bot:
+            await SendEphemeralResponse(
+                interaction, "Bot accounts cannot be reported through this form.", ephemeral=True
+            )
+            return
+        await self.parentView.MemberSelected(interaction, selected)
+
+
 class ReportScamUserSelectView(discord.ui.View):
     """Let reporters select an actual server member instead of typing an ID."""
 
@@ -116,20 +143,34 @@ class ReportScamUserSelectView(discord.ui.View):
         self.databaseManager = databaseManager
         self.selectedMember: discord.Member | None = None
 
-    @discord.ui.user_select(
-        placeholder="Choose the member you want to report",
-        min_values=1,
-        max_values=1,
-    )
-    async def SelectReportedMember(
-        self, interaction: discord.Interaction, select: discord.ui.UserSelect
-    ) -> None:
-        selected = select.values[0]
-        if not isinstance(selected, discord.Member):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != getattr(self, "reporterId", interaction.user.id):
             await SendEphemeralResponse(
-                interaction, "Please select a member of this server.", ephemeral=True
+                interaction, "Only the person who opened this report form can use it.", ephemeral=True
             )
-            return
+            return False
+        return True
+
+    async def on_error(
+        self, interaction: discord.Interaction, error: Exception,
+        item: discord.ui.Item, /
+    ) -> None:
+        _logger.exception("Error in scam-report member picker", exc_info=error)
+        if not interaction.response.is_done():
+            await SendEphemeralResponse(
+                interaction, "The member picker failed. Use **Enter User ID Instead**.", ephemeral=True
+            )
+
+    def __init__(self, databaseManager: DatabaseManager, reporterId: int | None = None):
+        super().__init__(timeout=300)
+        self.databaseManager = databaseManager
+        self.reporterId = reporterId
+        self.selectedMember: discord.Member | None = None
+        self.add_item(ReportScamUserSelect(self))
+
+    async def MemberSelected(
+        self, interaction: discord.Interaction, selected: discord.Member
+    ) -> None:
         self.selectedMember = selected
         self.ContinueButton.disabled = False
         await interaction.response.edit_message(
@@ -540,7 +581,7 @@ class MainPanelView(discord.ui.View):
         try:
             await interaction.response.send_message(
                 "Select a server member and press **Continue**, or choose **Enter User ID Instead** if the member picker is unavailable.",
-                view=ReportScamUserSelectView(self.databaseManager),
+                view=ReportScamUserSelectView(self.databaseManager, interaction.user.id),
                 ephemeral=True,
             )
         except discord.NotFound as error:
