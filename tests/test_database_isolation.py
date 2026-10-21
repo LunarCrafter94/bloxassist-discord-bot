@@ -352,6 +352,25 @@ class PerGuildDatabaseTests(unittest.TestCase):
         reviewed = self.guildA.Execute("SELECT status, reviewed_by, review_note FROM scam_reports WHERE report_id = ?", (reportId,), fetchOne=True)
         self.assertEqual((reviewed["status"], reviewed["reviewed_by"], reviewed["review_note"]), ("confirmed", 960004, "Transcript reviewed"))
 
+        # General reports may be submitted without targeting a specific member.
+        bugReportId = self.guildA.CreateScamReport(
+            960005,
+            None,
+            "The Continue button is not visible on mobile.",
+            reportType="bug",
+        )
+        bugReport = self.guildA.Execute(
+            "SELECT reporter_user_id, reported_user_id, report_type, details FROM scam_reports WHERE report_id = ?",
+            (bugReportId,), fetchOne=True,
+        )
+        self.assertEqual(bugReport["reporter_user_id"], 960005)
+        self.assertEqual(bugReport["reported_user_id"], 0)
+        self.assertEqual(bugReport["report_type"], "bug")
+        self.assertEqual(bugReport["details"], "The Continue button is not visible on mobile.")
+        self.assertTrue(self.guildA.ResolveScamReport(
+            bugReportId, reviewedBy=960004, decision="dismissed", note="Fixed in latest update"
+        ))
+
     def testCreditAdjustmentIsAtomicAndAudited(self):
         userId = 7101
         actorId = 7201
