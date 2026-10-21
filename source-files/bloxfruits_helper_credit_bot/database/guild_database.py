@@ -952,6 +952,13 @@ class GuildDatabase:
                 for helperId in helpers:
                     self._EnsureUserWithinTransaction(helperId, defaultCredits)
                 debtRow = self.connection.execute("SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedCreatorId,)).fetchone()
+                debtorHelper = self.connection.execute(
+                    "SELECT user_id FROM credit_debts WHERE amount > 0 AND user_id IN (" + ",".join("?" for _ in helpers) + ")",
+                    tuple(helpers),
+                ).fetchone()
+                if debtorHelper is not None:
+                    self.connection.rollback()
+                    return None
                 if debtRow is not None and int(debtRow["amount"] or 0) > 0:
                     self.connection.rollback()
                     return None
