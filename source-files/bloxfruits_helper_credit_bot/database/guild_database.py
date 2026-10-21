@@ -228,6 +228,13 @@ class GuildDatabase:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS credit_debts (
+                user_id INTEGER PRIMARY KEY,
+                amount INTEGER NOT NULL DEFAULT 0 CHECK (amount >= 0),
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS scam_reports (
                 report_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 reporter_user_id INTEGER NOT NULL,
@@ -586,6 +593,54 @@ class GuildDatabase:
                 created = self._EnsureUserWithinTransaction(int(userId), int(credits))
                 self.connection.commit()
                 return created
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def GetCreditDebt(self, userId: int) -> int:
+        row = self.Execute("SELECT amount FROM credit_debts WHERE user_id = ?", (int(userId),), fetchOne=True)
+        return int(row["amount"] or 0) if row else 0
+
+    def ApplyPenaltyDebt(self, userId: int, amount: int, *, actorUserId: int, reason: str, idempotencyKey: str | None = None) -> tuple[str, int | None, int]:
+        """Apply an audited penalty, using available credits before recording unpaid debt."""
+        penalty = int(amount)
+        note = str(reason).strip()[:500]
+        if penalty <= 0 or penalty > 1_000_000_000 or not note:
+            raise ValueError("A positive penalty up to 1,000,000,000 and a reason are required.")
+        targetId, actorId = int(userId), int(actorUserId)
+        key = str(idempotencyKey).strip() if idempotencyKey else None
+        with self.databaseLock:
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
+            try:
+                if key:
+                    prior = self.connection.execute("SELECT * FROM transactions WHERE idempotency_key = ?", (key,)).fetchone()
+                    if prior is not None:
+                        same = str(prior["type"]) == "penalty_debt" and int(prior["amount"]) == penalty and prior["to_user"] == targetId and prior["actor_user_id"] == actorId
+                        debtRow = self.connection.execute('SELECT amount FROM credit_debts WHERE user_id = ?', (targetId,)).fetchone()
+                        debt = int(debtRow["amount"]) if debtRow else 0
+                        balanceRow = self.connection.execute('SELECT credits FROM users WHERE user_id = ?', (targetId,)).fetchone()
+                        balance = int(balanceRow["credits"]) if balanceRow else None
+                        self.connection.rollback()
+                        return ("duplicate" if same else "idempotency_conflict"), balance, debt
+                self._EnsureUserWithinTransaction(targetId, self.GetDefaultJoinCredits())
+                userRow = self.connection.execute("SELECT credits FROM users WHERE user_id = ?", (targetId,)).fetchone()
+                credits = int(userRow["credits"])
+                debtRow = self.connection.execute("SELECT amount FROM credit_debts WHERE user_id = ?", (targetId,)).fetchone()
+                oldDebt = int(debtRow["amount"]) if debtRow else 0
+                consumed = min(credits, penalty)
+                newCredits = credits - consumed
+                newDebt = oldDebt + penalty - consumed
+                self.connection.execute("UPDATE users SET credits = ? WHERE user_id = ?", (newCredits, targetId))
+                self.connection.execute("""INSERT INTO credit_debts(user_id, amount, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(user_id) DO UPDATE SET amount = excluded.amount, updated_at = CURRENT_TIMESTAMP""",
+                    (targetId, newDebt),
+                )
+                self.connection.execute("""INSERT INTO transactions(ticket_id, from_user, to_user, amount, type, actor_user_id, note, idempotency_key)
+                    VALUES (NULL, ?, ?, ?, 'penalty_debt', ?, ?, ?)""",
+                    (targetId, targetId, penalty, actorId, note, key),
+                )
+                self.connection.commit()
+                return "penalized", newCredits, newDebt
             except Exception:
                 self.connection.rollback()
                 raise
