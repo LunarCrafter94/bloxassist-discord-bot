@@ -169,19 +169,22 @@ async def PublishTicketTranscript(
         member = channel.guild.get_member(int(userId))
         return member.display_name if member is not None else f"Unknown member ({userId})"
 
+    def memberNameAndId(userId: int) -> str:
+        return f"{memberDisplayName(userId)} (user ID: {int(userId)})"
+
     finalizedBy = (
         "(system/automatic)"
         if actorUserId is None
-        else memberDisplayName(int(actorUserId))
+        else memberNameAndId(int(actorUserId))
     )
     lines = [
         "BloxAssist Ticket Transcript",
-        f"Server: {channel.guild.name}",
+        f"Server: {channel.guild.name} (server ID: {channel.guild.id})",
         f"Ticket: {ticketLabel}",
         f"Status: {finalStatus}",
-        f"Requester: {memberDisplayName(requesterId)}",
-        f"Original helpers: {', '.join(memberDisplayName(userId) for userId in helperIds) or '(none)'}",
-        f"Active helpers at close: {', '.join(memberDisplayName(userId) for userId in activeHelperIds) or '(none)'}",
+        f"Requester: {memberNameAndId(requesterId)}",
+        f"Original helpers: {', '.join(memberNameAndId(userId) for userId in helperIds) or '(none)'}",
+        f"Active helpers at close: {', '.join(memberNameAndId(userId) for userId in activeHelperIds) or '(none)'}",
         f"Credits reserved: {ticket['reserved_credits']}",
         f"Generated: {DateTime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
         f"Finalized by: {finalizedBy}",
@@ -198,7 +201,7 @@ async def PublishTicketTranscript(
         async for message in channel.history(limit=None, oldest_first=True):
             timestamp = message.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
             authorName = getattr(message.author, "display_name", None) or getattr(message.author, "name", "Unknown user")
-            messageLines = [f"[{timestamp}] {authorName}"]
+            messageLines = [f"[{timestamp}] {authorName} (user ID: {message.author.id})"]
             if message.clean_content:
                 messageLines.append(message.clean_content)
             for embedIndex, embedItem in enumerate(message.embeds, start=1):
