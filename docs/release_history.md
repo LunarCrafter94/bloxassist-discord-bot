@@ -2,6 +2,16 @@
 
 This page summarizes the current development release and its user-facing changes. It is the maintained release summary linked from the root [README](../README.md). Older installation and changelog notes remain archived in [`history/releases/historical-installation-and-changelogs.zip`](history/releases/historical-installation-and-changelogs.zip); use the current documentation for current setup instructions.
 
+## Release candidate 0.9.0 — Credit debt, inviter penalties, and full audit history
+
+Full feature inventory: [`changelog-0.9.0.md`](changelog-0.9.0.md).
+
+- Added owner-only `/penalty` with separate credit-debt tracking, debt-based service participation guards, and an owner-configurable inviter-leave penalty.
+- Expanded credit movement auditing so ticket reservations, payouts, refunds, adjustments, and applicable penalties/rewards have explicit ledger/audit entries with recorded actors and reasons where available.
+- Preserves the v0.8.0 ticket, transcript, Help Center, dashboard, invite reward, scam report, encrypted backup, and database migration workflows documented in the complete feature notes.
+
+> **Acceptance status:** Package metadata and changelog are prepared for v0.9.0. Live Discord testing of the latest debt, leave-penalty, and transaction-audit workflows is still required before treating this as production-verified. The GitHub tag/release still needs to be published.
+
 ## Hotfix 0.7.1 — Ticket numbering, transcript retention, and Discord interaction errors
 
 Full user-facing notes: [`changelog-0.7.1.md`](changelog-0.7.1.md).
