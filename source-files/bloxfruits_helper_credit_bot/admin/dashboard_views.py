@@ -233,7 +233,7 @@ def BuildDashboardEmbed(guild: discord.Guild, guildDatabase: GuildDatabase) -> d
     embed.add_field(name="Dashboard moderator roles", value=moderatorText, inline=False)
     auditChannelId = guildDatabase.GetSetting("audit_log_channel_id", "") or ""
     auditChannelText = f" <#{auditChannelId}>" if auditChannelId.isdigit() else "Not configured"
-    embed.add_field(name="Ticket transcripts · audit log · scam reports", value=auditChannelText, inline=False)
+    embed.add_field(name="Ticket transcripts · credit audit · reports", value=auditChannelText, inline=False)
     welcomeText = (guildDatabase.GetSetting("ticket_welcome_message", "") or "").strip()
     welcomeState = "Enabled" if welcomeText else "Disabled"
     embed.add_field(
@@ -453,7 +453,7 @@ class DashboardView(discord.ui.View):
             return
         await SendEphemeralResponse(
             interaction,
-            "Choose the private channel where ticket transcripts, credit-change audit entries, invite rewards, and scam reports should be posted. Give the bot Send Messages, Embed Links, Attach Files, and Read Message History.",
+            "Choose the private channel where ticket transcripts, credit-change audit entries, invite rewards, and general moderation reports should be posted. Give the bot Send Messages, Embed Links, Attach Files, and Read Message History.",
             view=AuditLogChannelView(self.databaseManager),
             ephemeral=True,
         )
@@ -1017,7 +1017,7 @@ class AuditLogChannelPicker(discord.ui.ChannelSelect):
         db.SetSetting("audit_log_channel_id", channel.id)
         await SendEphemeralResponse(
             interaction,
-            f"✅ Audit log channel set to {channel.mention}. New ticket transcripts, credit-change logs, invite rewards, and scam reports will be sent there.",
+            f"✅ Audit log channel set to {channel.mention}. New ticket transcripts, credit-change logs, invite rewards, and general reports will be sent there.",
             ephemeral=True,
         )
         await RefreshDashboardMessage(interaction.guild, db, view.databaseManager)
