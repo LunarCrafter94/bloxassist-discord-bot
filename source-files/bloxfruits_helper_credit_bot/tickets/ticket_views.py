@@ -254,20 +254,21 @@ class ReportScamUserSelectView(discord.ui.View):
 
     async def CategorySelected(self, interaction: discord.Interaction, reportType: str) -> None:
         self.reportType = reportType if reportType in REPORT_CATEGORY_LABELS else "other"
-        self.sourceInteraction = self.sourceInteraction or interaction
         await interaction.response.edit_message(content=self._PromptText(), view=self)
+        # Keep the most recent message-edit interaction token for timeout cleanup.
+        self.sourceInteraction = interaction
 
     async def MemberSelected(
         self, interaction: discord.Interaction, selected: discord.Member
     ) -> None:
         self.selectedMember = selected
-        self.sourceInteraction = self.sourceInteraction or interaction
         await interaction.response.edit_message(content=self._PromptText(), view=self)
+        self.sourceInteraction = interaction
 
     async def MemberCleared(self, interaction: discord.Interaction) -> None:
         self.selectedMember = None
-        self.sourceInteraction = self.sourceInteraction or interaction
         await interaction.response.edit_message(content=self._PromptText(), view=self)
+        self.sourceInteraction = interaction
 
     async def on_timeout(self) -> None:
         # The default timeout merely disables components; remove the ephemeral
