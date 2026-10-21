@@ -68,6 +68,46 @@ def IsConfiguredTicketStaff(interaction: discord.Interaction, guildDatabase: Gui
     return bool(permittedRoleIds.intersection(memberRoleIds))
 
 
+class ReportScamUserIdModal(discord.ui.Modal, title="Report by User ID"):
+    reportedMember = discord.ui.TextInput(
+        label="Reported member (mention or user ID)",
+        placeholder="@member or 123456789012345678",
+        min_length=3,
+        max_length=40,
+    )
+
+    def __init__(self, databaseManager: DatabaseManager):
+        super().__init__(timeout=300)
+        self.databaseManager = databaseManager
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await SendEphemeralResponse(
+                interaction, "Reports can only be submitted inside a server.", ephemeral=True
+            )
+            return
+        raw = str(self.reportedMember.value).strip()
+        match = re.fullmatch(r"<@!?(\\d{15,22})>|(\\d{15,22})", raw)
+        if not match:
+            await SendEphemeralResponse(
+                interaction, "Enter a valid member mention or numeric Discord user ID.", ephemeral=True
+            )
+            return
+        reportedId = int(match.group(1) or match.group(2))
+        if reportedId == interaction.user.id:
+            await SendEphemeralResponse(interaction, "You cannot report yourself.", ephemeral=True)
+            return
+        member = interaction.guild.get_member(reportedId)
+        if member is not None and member.bot:
+            await SendEphemeralResponse(
+                interaction, "Bot accounts cannot be reported through this form.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            ReportScamModal(self.databaseManager, reportedId)
+        )
+
+
 class ReportScamUserSelectView(discord.ui.View):
     """Let reporters select an actual server member instead of typing an ID."""
 
@@ -95,6 +135,14 @@ class ReportScamUserSelectView(discord.ui.View):
         await interaction.response.edit_message(
             content=f"Selected member: **{selected.display_name}**. Continue to describe the report.",
             view=self,
+        )
+
+    @discord.ui.button(label="Enter User ID Instead", style=discord.ButtonStyle.secondary)
+    async def EnterUserIdButton(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_modal(
+            ReportScamUserIdModal(self.databaseManager)
         )
 
     @discord.ui.button(label="Continue", style=discord.ButtonStyle.danger, disabled=True)
@@ -491,7 +539,7 @@ class MainPanelView(discord.ui.View):
     async def ReportScam(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         try:
             await interaction.response.send_message(
-                "Select the member you want to report, then press **Continue**.",
+                "Select a server member and press **Continue**, or choose **Enter User ID Instead** if the member picker is unavailable.",
                 view=ReportScamUserSelectView(self.databaseManager),
                 ephemeral=True,
             )
