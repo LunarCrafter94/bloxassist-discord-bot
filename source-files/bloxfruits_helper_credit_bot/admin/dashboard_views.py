@@ -557,7 +557,7 @@ class TicketWelcomeMessageModal(discord.ui.Modal, title="Ticket Welcome Message"
 
 class InviteLeavePenaltyModal(discord.ui.Modal, title="Inviter Leave Penalty"):
     amount = discord.ui.TextInput(
-        label="Penalty per invited member leaving (0 disables)",
+        label="Penalty per invited member (0 disables)",
         placeholder="0",
         min_length=1,
         max_length=10,
