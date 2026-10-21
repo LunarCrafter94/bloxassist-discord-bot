@@ -648,6 +648,9 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         if isinstance(amount, bool) or amount <= 0 or amount > 1_000_000_000:
             await SendEphemeralResponse(interaction, "Amount must be a whole number between 1 and 1,000,000,000.", ephemeral=True)
             return
+        if not reason or not reason.strip():
+            await SendEphemeralResponse(interaction, "A reason is required so the credit change is documented in the audit log.", ephemeral=True)
+            return
         if member.bot:
             await SendEphemeralResponse(interaction, "Credits cannot be adjusted for bot accounts.", ephemeral=True)
             return
