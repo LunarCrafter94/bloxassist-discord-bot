@@ -951,6 +951,10 @@ class GuildDatabase:
                 self._EnsureUserWithinTransaction(normalizedCreatorId, defaultCredits)
                 for helperId in helpers:
                     self._EnsureUserWithinTransaction(helperId, defaultCredits)
+                debtRow = self.connection.execute("SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedCreatorId,)).fetchone()
+                if debtRow is not None and int(debtRow["amount"] or 0) > 0:
+                    self.connection.rollback()
+                    return None
                 reservation = self.connection.execute(
                     "UPDATE users SET credits = credits - ? "
                     "WHERE user_id = ? AND credits >= ?",
