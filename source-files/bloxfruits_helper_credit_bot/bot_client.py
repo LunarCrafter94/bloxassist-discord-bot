@@ -288,6 +288,9 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 return
             if usedInvite is None or usedInvite.inviter is None or usedInvite.inviter.bot:
                 return
+            # Save attribution even outside an active reward event so leave penalties
+            # can only ever affect the inviter actually identified for this member.
+            guildDatabase.RecordInviteAttribution(member.id, usedInvite.inviter.id, str(usedInvite.code))
             event = guildDatabase.GetActiveInviteEvent()
             if event is None:
                 return
@@ -308,6 +311,61 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                     await usedInvite.inviter.send(f"🎟️ You earned **{reward:,} credits** in **{member.guild.name}** for inviting a new member during invite event #{int(event['event_id'])}.")
                 except discord.HTTPException:
                     logger.info("Could not DM inviter %s about reward in guild %s", usedInvite.inviter.id, member.guild.id)
+
+        async def on_member_remove(self, member: discord.Member) -> None:
+            """Apply the configured leave penalty only to this member's recorded inviter."""
+            guildDatabase = databaseManager.ForServer(member.guild.id)
+            try:
+                penalty = int(guildDatabase.GetSetting("invite_leave_penalty_credits", "0") or "0")
+            except (TypeError, ValueError):
+                logger.error("Invalid invite leave penalty setting in guild %s", member.guild.id)
+                return
+            if penalty <= 0:
+                return
+            attribution = guildDatabase.GetInviteAttribution(member.id)
+            if attribution is None:
+                # No reliable invite attribution means no penalty; never guess or deduct
+                # from unrelated members.
+                return
+            inviterId = int(attribution["inviter_user_id"])
+            if inviterId == int(member.id) or (self.user is not None and inviterId == self.user.id):
+                return
+            try:
+                status, balance, debt = guildDatabase.ApplyPenaltyDebt(
+                    inviterId,
+                    penalty,
+                    actorUserId=self.user.id if self.user is not None else member.guild.owner_id,
+                    reason=f"Invite penalty: invited member {member.id} left the server (invite {str(attribution['invite_code'])[:80] or 'unknown'})",
+                    idempotencyKey=f"invite-leave-penalty:{member.guild.id}:{member.id}",
+                )
+                if status not in {"penalized", "duplicate"}:
+                    logger.warning("Invite leave penalty not applied: guild=%s invited=%s inviter=%s status=%s", member.guild.id, member.id, inviterId, status)
+                    return
+                guildDatabase.MarkInviteLeavePenaltyApplied(member.id)
+                if status == "penalized":
+                    embed = discord.Embed(
+                        title="⚖️ Inviter leave penalty applied",
+                        description=f"Invited member <@{member.id}> left the server. Only their recorded inviter, <@{inviterId}>, was penalized.",
+                        color=discord.Color.orange(),
+                        timestamp=discord.utils.utcnow(),
+                    )
+                    embed.add_field(name="Penalty", value=f"{penalty:,} credits", inline=True)
+                    embed.add_field(name="Inviter balance", value=f"{int(balance or 0):,} credits", inline=True)
+                    embed.add_field(name="Outstanding debt", value=f"{int(debt):,} credits", inline=True)
+                    embed.add_field(name="Invite code", value=f"`{str(attribution['invite_code'])[:80] or 'unknown'}`", inline=False)
+                    await SendAuditLog(member.guild, guildDatabase, embed)
+                    try:
+                        inviter = member.guild.get_member(inviterId)
+                        if inviter is not None:
+                            await inviter.send(
+                                f"⚖️ A **{penalty:,}-credit** invite penalty was applied in **{member.guild.name}** "
+                                f"because a member you invited (<@{member.id}>) left. Your balance is "
+                                f"**{int(balance or 0):,}** and outstanding debt is **{int(debt):,}**."
+                            )
+                    except discord.HTTPException:
+                        logger.info("Could not DM inviter %s about leave penalty in guild %s", inviterId, member.guild.id)
+            except Exception:
+                logger.exception("Could not apply invite leave penalty: guild=%s invited=%s", member.guild.id, member.id)
 
     bot = CreditBot()
 
