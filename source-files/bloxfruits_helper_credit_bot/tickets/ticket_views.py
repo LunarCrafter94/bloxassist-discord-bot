@@ -526,13 +526,14 @@ async def FinalizeTicketChannel(
         embed.add_field(name="Ticket ID", value=str(ticketId))
         embed.add_field(name="Resolved by", value=f"<@{actorUserId}> (`{actorUserId}`)" if actorUserId else "Automatic workflow / system", inline=False)
         await SendAuditLog(channel.guild, db, embed)
-        # Send each credit movement as its own embed so history, actors, and reasons
-        # are never silently truncated by Discord's 1,024-character field limit.
-        await AuditTicketCreditTransactions(channel.guild, db, ticketId)
     else:
         archived = await ArchiveTicketChannel(channel, databaseManager, ticketId, "transcript could not be confirmed")
         if not archived:
             _logger.critical("Ticket transcript failed and channel could not be archived; manual data recovery needed: guild=%s ticket=%s", channel.guild.id, ticketId)
+    # Send each credit movement as its own embed so history, actors, and reasons
+    # are never silently truncated by Discord's 1,024-character field limit.
+    # Run this even if transcript delivery failed; the credit ledger still changed.
+    await AuditTicketCreditTransactions(channel.guild, db, ticketId)
     return success
 
 
