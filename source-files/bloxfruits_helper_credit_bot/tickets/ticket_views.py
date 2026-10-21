@@ -683,43 +683,104 @@ class HelperPicker(discord.ui.UserSelect):
         if interaction.guild_id is None:
             await SendEphemeralResponse(interaction, GetServerOnlyMessage(), ephemeral=True)
             return
-        helpers = [member for member in self.values if member.id != interaction.user.id]
-        if self.count > GetDatabaseForInteraction(interaction, self.databaseManager).GetMaxHelpers():
-            await SendEphemeralResponse(interaction, 
-                "The server's maximum helper setting changed. Please restart your ticket request.",
+
+        view = self.view
+        if not isinstance(view, HelperPickerView):
+            await SendEphemeralResponse(
+                interaction,
+                "This helper-selection step has expired. Please start your ticket request again.",
                 ephemeral=True,
             )
             return
-        if len(helpers) != self.count:
-            await SendEphemeralResponse(interaction, 
-                "You cannot select yourself as a helper. Please select other members.",
-                ephemeral=True,
-            )
-            return
+
         guildDatabase = GetDatabaseForInteraction(interaction, self.databaseManager)
-        if guildDatabase.GetOpenTicketForUser(interaction.user.id):
-            await SendEphemeralResponse(interaction, 
-                "You already have an open ticket in this server.", ephemeral=True
+        if self.count > guildDatabase.GetMaxHelpers():
+            view.selectedHelperIds = []
+            await interaction.response.edit_message(
+                content="The server's maximum helper setting changed. Please restart your ticket request.",
+                view=None,
             )
             return
-        services = guildDatabase.ListServices(activeOnly=True)
-        if not services:
-            await SendEphemeralResponse(interaction, 
-                "No services are currently available. Please contact a server moderator.",
-                ephemeral=True,
+
+        selectedIds = [member.id for member in self.values]
+        if len(selectedIds) != self.count or interaction.user.id in selectedIds:
+            view.selectedHelperIds = []
+            await interaction.response.edit_message(
+                content=(
+                    f"Please select exactly {self.count} other member(s). "
+                    "You cannot select yourself as a helper. Then try again."
+                ),
+                view=view,
             )
             return
-        await SendEphemeralResponse(interaction, 
-            "Now choose the Blox Fruits event.",
-            view=EventView(self.databaseManager, [member.id for member in helpers], interaction.guild_id, self.wizardInteractions + [interaction]),
-            ephemeral=True,
+
+        view.selectedHelperIds = selectedIds
+        await interaction.response.edit_message(
+            content=(
+                f"✅ Selected **{len(selectedIds)} of {self.count} helper(s)**. "
+                "Press **Continue** below the dropdown to choose the Blox Fruits event."
+            ),
+            view=view,
         )
 
 
 class HelperPickerView(discord.ui.View):
     def __init__(self, databaseManager: DatabaseManager, count: int, wizardInteractions: list[discord.Interaction] | None = None):
         super().__init__(timeout=60)
-        self.add_item(HelperPicker(databaseManager, count, wizardInteractions))
+        self.databaseManager = databaseManager
+        self.count = count
+        self.wizardInteractions = list(wizardInteractions or [])
+        self.selectedHelperIds: list[int] = []
+        self.add_item(HelperPicker(databaseManager, count, self.wizardInteractions))
+
+    @discord.ui.button(
+        label="Continue",
+        emoji="➡️",
+        style=discord.ButtonStyle.primary,
+        row=1,
+        custom_id="bf:ticket_helper_continue",
+    )
+    async def Continue(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, GetServerOnlyMessage(), ephemeral=True)
+            return
+
+        if len(self.selectedHelperIds) != self.count:
+            await interaction.response.edit_message(
+                content=f"Select exactly {self.count} helper(s) in the dropdown, then press **Continue**.",
+                view=self,
+            )
+            return
+
+        guildDatabase = GetDatabaseForInteraction(interaction, self.databaseManager)
+        if self.count > guildDatabase.GetMaxHelpers():
+            await interaction.response.edit_message(
+                content="The server's maximum helper setting changed. Please start your ticket request again.",
+                view=None,
+            )
+            return
+        if guildDatabase.GetOpenTicketForUser(interaction.user.id):
+            await interaction.response.edit_message(
+                content="You already have an open ticket in this server. No new ticket was created.",
+                view=None,
+            )
+            return
+        if not guildDatabase.ListServices(activeOnly=True):
+            await interaction.response.edit_message(
+                content="No services are currently available. Please contact a server moderator.",
+                view=None,
+            )
+            return
+
+        await interaction.response.edit_message(
+            content="Now choose the Blox Fruits event.",
+            view=EventView(
+                self.databaseManager,
+                self.selectedHelperIds,
+                interaction.guild_id,
+                self.wizardInteractions,
+            ),
+        )
 
 
 class EventSelect(discord.ui.Select):
