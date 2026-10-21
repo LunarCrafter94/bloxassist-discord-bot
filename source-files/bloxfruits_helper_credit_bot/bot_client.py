@@ -529,6 +529,46 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         await SendAuditLog(interaction.guild, db, auditEmbed)
         logger.info("Server-owner credit add: guild=%s actor=%s target=%s amount=%s reason=%r", interaction.guild_id, interaction.user.id, member.id, amount, reason)
 
+    @bot.tree.command(name="penalty", description="Server owner only: apply a penalty that may create credit debt.")
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.guild_only()
+    @app_commands.describe(member="Member receiving the penalty", amount="Penalty amount in credits", reason="Required reason for the penalty")
+    async def CreditPenalty(interaction: discord.Interaction, member: discord.Member, amount: int, reason: str) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "This command must be used inside a server.", ephemeral=True)
+            return
+        if not IsServerOwner(interaction):
+            await SendEphemeralResponse(interaction, "Only the server owner can use /penalty. Players and configured moderators cannot create credit debt.", ephemeral=True)
+            return
+        db = databaseManager.ForServer(interaction.guild_id)
+        if db.IsUserParticipantInAnyOpenTicket(interaction.user.id):
+            await SendEphemeralResponse(interaction, "Credit moderation is disabled while you participate in an open ticket. Wait until it is resolved.", ephemeral=True)
+            return
+        if member.bot or member.id == interaction.user.id:
+            await SendEphemeralResponse(interaction, "Choose another human member; bot accounts and yourself cannot receive this penalty.", ephemeral=True)
+            return
+        if isinstance(amount, bool) or amount <= 0 or amount > 1_000_000_000 or not reason or not reason.strip():
+            await SendEphemeralResponse(interaction, "Provide a penalty from 1 to 1,000,000,000 credits and a non-empty reason.", ephemeral=True)
+            return
+        await DeferEphemeralResponse(interaction, thinking=True)
+        try:
+            status, balance, debt = db.ApplyPenaltyDebt(member.id, amount, actorUserId=interaction.user.id, reason=reason, idempotencyKey=f"slash-penalty:{interaction.id}")
+        except Exception:
+            logger.exception("Credit penalty failed: guild=%s actor=%s target=%s", interaction.guild_id, interaction.user.id, member.id)
+            await EditEphemeralOriginalResponse(interaction, content="The penalty failed. No success was recorded; check the transaction ledger before retrying.")
+            return
+        if status != "penalized":
+            await EditEphemeralOriginalResponse(interaction, content=f"Penalty was not applied (status: {status}).")
+            return
+        await EditEphemeralOriginalResponse(interaction, content=f"⚖️ Applied a {amount:,}-credit penalty to {member.mention}.\nCurrent credits: {balance:,}. Outstanding debt: {debt:,}.\nReason: {reason.strip()[:500]}\nMembers with debt cannot create/host services.")
+        embed = discord.Embed(title="⚖️ Credit penalty applied", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Member", value=f"{member.mention} (`{member.id}`)", inline=False)
+        embed.add_field(name="Applied by", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        embed.add_field(name="Penalty", value=f"{amount:,} credits", inline=True)
+        embed.add_field(name="Outstanding debt", value=f"{debt:,} credits", inline=True)
+        embed.add_field(name="Reason", value=reason.strip()[:1000], inline=False)
+        await SendAuditLog(interaction.guild, db, embed)
+        logger.info("Server-owner penalty applied: guild=%s actor=%s target=%s amount=%s debt=%s reason=%r", interaction.guild_id, interaction.user.id, member.id, amount, debt, reason)
     @bot.tree.command(name="deduct", description="Server owner only: deduct credits from a member with an audit record.")
     @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
