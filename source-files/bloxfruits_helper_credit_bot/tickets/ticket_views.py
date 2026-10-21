@@ -103,7 +103,7 @@ class ReportScamUserIdModal(discord.ui.Modal, title="Report by User ID"):
             )
             return
         raw = str(self.reportedMember.value).strip()
-        match = re.fullmatch(r"<@!?(\\d{15,22})>|(\\d{15,22})", raw)
+        match = re.fullmatch(r"<@!?(\d{15,22})>|(\d{15,22})", raw)
         if not match:
             await SendEphemeralResponse(
                 interaction, "Enter a valid member mention or numeric Discord user ID.", ephemeral=True
