@@ -544,8 +544,8 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
     @bot.tree.command(name="add", description="Server owner only: add credits to a member with an audit record.")
     @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
-    @app_commands.describe(member="Member receiving credits", amount="Positive number of credits", reason="Why these credits are being added (optional)")
-    async def AddCredits(interaction: discord.Interaction, member: discord.Member, amount: int, reason: str | None = None) -> None:
+    @app_commands.describe(member="Member receiving credits", amount="Positive number of credits", reason="Required reason for adding these credits")
+    async def AddCredits(interaction: discord.Interaction, member: discord.Member, amount: int, reason: str) -> None:
         if interaction.guild_id is None or interaction.guild is None:
             await SendEphemeralResponse(interaction, "This command must be used inside a server.", ephemeral=True)
             return
@@ -558,6 +558,9 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             return
         if isinstance(amount, bool) or amount <= 0 or amount > 1_000_000_000:
             await SendEphemeralResponse(interaction, "Amount must be a whole number between 1 and 1,000,000,000.", ephemeral=True)
+            return
+        if not reason or not reason.strip():
+            await SendEphemeralResponse(interaction, "A reason is required so the credit change is documented in the audit log.", ephemeral=True)
             return
         if member.bot:
             await SendEphemeralResponse(interaction, "Credits cannot be adjusted for bot accounts.", ephemeral=True)
@@ -630,8 +633,8 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
     @bot.tree.command(name="deduct", description="Server owner only: deduct credits from a member with an audit record.")
     @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
-    @app_commands.describe(member="Member losing credits", amount="Positive number of credits", reason="Why these credits are being deducted (optional)")
-    async def DeductCredits(interaction: discord.Interaction, member: discord.Member, amount: int, reason: str | None = None) -> None:
+    @app_commands.describe(member="Member losing credits", amount="Positive number of credits", reason="Required reason for deducting these credits")
+    async def DeductCredits(interaction: discord.Interaction, member: discord.Member, amount: int, reason: str) -> None:
         if interaction.guild_id is None or interaction.guild is None:
             await SendEphemeralResponse(interaction, "This command must be used inside a server.", ephemeral=True)
             return
