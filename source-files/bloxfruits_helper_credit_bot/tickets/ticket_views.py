@@ -201,7 +201,7 @@ async def PublishTicketTranscript(
         async for message in channel.history(limit=None, oldest_first=True):
             timestamp = message.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
             authorName = getattr(message.author, "display_name", None) or getattr(message.author, "name", "Unknown user")
-            messageLines = [f"[{timestamp}] {authorName} (user ID: {message.author.id})"]
+            messageLines = [f"[{timestamp}] {authorName}"]
             if message.clean_content:
                 messageLines.append(message.clean_content)
             for embedIndex, embedItem in enumerate(message.embeds, start=1):
