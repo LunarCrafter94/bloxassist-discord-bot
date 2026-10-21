@@ -6,7 +6,7 @@
 
 A slash-command Discord bot for multi-server ticket support and credit balances. Each Discord server has isolated data, ticket numbering, services, settings, audit records, and invite-reward event history.
 
-> **v0.9.0 release notes prepared.** This code line adds owner-only penalties with separately tracked credit debt, configurable inviter-leave penalties, and more detailed transaction-by-transaction audit delivery. The full feature inventory is in [`docs/changelog-0.9.0.md`](docs/changelog-0.9.0.md). Live Discord acceptance testing is still required for the latest debt, penalty, and audit-log paths; PostgreSQL and backup delivery also require deployment verification.
+> **Current source status:** The published v0.9.0 pre-release tag is unchanged; `main` also contains unreleased follow-up fixes for ticket-helper selection, general issue reporting, and the inviter-penalty modal. See [`docs/release_history.md`](docs/release_history.md) for the difference. The v0.9.0 feature inventory is in [`docs/changelog-0.9.0.md`](docs/changelog-0.9.0.md). Live Discord acceptance testing is still required for debt, penalties, report delivery, audit logging, and PostgreSQL/backup deployment.
 
 ## Features
 
