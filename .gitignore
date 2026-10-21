@@ -4,8 +4,10 @@
 *.env
 *.env.*
 private-configs/tokens.env
+private-configs/runtime.env
+private-configs/credentials.env
 !.env.example
-!private-configs/tokens.env.example
+!private-configs/credentials.env.example
 
 # Python bytecode and virtual environments
 __pycache__/
@@ -31,6 +33,7 @@ data/
 
 # Local backups, editable notes and logs
 _backups/
+backup/
 _notes/
 *.log
 

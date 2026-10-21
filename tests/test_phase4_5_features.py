@@ -40,6 +40,61 @@ class Phase4And5DatabaseTests(unittest.TestCase):
         self.assertEqual(payouts, [(2001, 100), (2002, 100)])
         self.assertEqual(self.db.CompleteTicket(self.ticketId)[0], "not_open")
 
+    def test_active_helper_can_propose_completion_but_requester_and_all_helpers_must_approve(self):
+        status, helpers = self.db.RequestTicketResolution(self.ticketId, "complete", 2001)
+        self.assertEqual(status, "requested")
+        self.assertEqual(helpers, [2001, 2002])
+        ticket = self.db.GetTicketById(self.ticketId)
+        self.assertEqual(ticket["resolution_requested_by"], 2001)
+        self.assertEqual(ticket["resolution_confirmations"], "2001")
+
+        # Requester and second helper must still approve; initiating doesn't bypass either vote.
+        requesterVote = self.db.ConfirmTicketResolution(self.ticketId, 1001)
+        self.assertEqual(requesterVote[:3], ("confirmed", 2, 3))
+        secondHelperVote = self.db.ConfirmTicketResolution(self.ticketId, 2002)
+        self.assertEqual(secondHelperVote[:3], ("ready", 3, 3))
+        status, payouts = self.db.CompleteTicket(self.ticketId, actorUserId=1001, note="all participants approved")
+        self.assertEqual(status, "completed")
+        self.assertEqual(payouts, [(2001, 100), (2002, 100)])
+
+    def test_active_helper_can_propose_cancellation_and_requester_can_reject(self):
+        self.assertEqual(self.db.GetBalance(1001), 300)
+        status, helpers = self.db.RequestTicketResolution(self.ticketId, "cancel", 2002)
+        self.assertEqual(status, "requested")
+        self.assertEqual(helpers, [2001, 2002])
+        result, resolutionType = self.db.RejectTicketResolution(self.ticketId, 1001)
+        self.assertEqual((result, resolutionType), ("rejected", "cancel"))
+        self.assertEqual(self.db.GetBalance(1001), 300)
+        self.assertEqual(self.db.GetTicketById(self.ticketId)["resolution_type"], "")
+
+    def test_helper_proposed_cancellation_waits_for_requester_and_other_helper(self):
+        status, helpers = self.db.RequestTicketResolution(self.ticketId, "cancel", 2001)
+        self.assertEqual(status, "requested")
+        self.assertEqual(helpers, [2001, 2002])
+        self.assertEqual(self.db.GetBalance(1001), 300)
+
+        # The initiator's vote is already recorded; neither the refund nor closure
+        # happens until the requester and the other active helper approve.
+        requesterVote = self.db.ConfirmTicketResolution(self.ticketId, 1001)
+        self.assertEqual(requesterVote[:3], ("confirmed", 2, 3))
+        self.assertEqual(self.db.GetBalance(1001), 300)
+        otherHelperVote = self.db.ConfirmTicketResolution(self.ticketId, 2002)
+        self.assertEqual(otherHelperVote[:3], ("ready", 3, 3))
+        status, amount = self.db.RefundTicket(self.ticketId, actorUserId=1001, note="all participants approved cancellation")
+        self.assertEqual((status, amount), ("refunded", 200))
+        self.assertEqual(self.db.GetBalance(1001), 500)
+
+    def test_nonparticipant_cannot_propose_ticket_resolution(self):
+        result, _ = self.db.RequestTicketResolution(self.ticketId, "complete", 3001)
+        self.assertEqual(result, "not_authorized")
+        self.assertEqual(self.db.GetTicketById(self.ticketId)["resolution_type"], "")
+
+    def test_nonparticipant_cannot_confirm_resolution(self):
+        self.db.RequestTicketResolution(self.ticketId, "complete", 1001)
+        result = self.db.ConfirmTicketResolution(self.ticketId, 3001)
+        self.assertEqual(result[0], "not_participant")
+        self.assertEqual(self.db.GetTicketById(self.ticketId)["resolution_confirmations"], "1001")
+
     def test_duplicate_helper_confirmation_does_not_count_twice(self):
         self.db.RequestTicketResolution(self.ticketId, "complete", 1001)
         self.assertEqual(self.db.ConfirmTicketResolution(self.ticketId, 2001)[0], "confirmed")

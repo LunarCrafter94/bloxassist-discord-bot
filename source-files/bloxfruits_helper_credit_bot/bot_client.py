@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -14,9 +15,13 @@ from .admin.dashboard_views import (
     RestoreSavedDashboardMessage,
 )
 from .credits.credit_service import CreditService
+from .audit import SendAuditLog
+from .invites.invite_events import FetchInviteUseCounts, FindUsedInvite
+from .backups import PerServerBackupService
 from .interaction_utils import DeferEphemeralResponse, EditEphemeralOriginalResponse, SendEphemeralFollowup, SendEphemeralResponse
 from .database import DatabaseManager
 from .settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES, RuntimeSettings
+from .ticket_numbers import TicketLabelFromRow
 from .tickets.ticket_views import (
     CancelUserTicket,
     CompleteCurrentTicket,
@@ -61,11 +66,16 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
     intents = discord.Intents.default()
     intents.members = True
     intents.guilds = True
+    # Ticket transcripts must include user-authored message text. This privileged
+    # intent must also be enabled in the Discord Developer Portal for the bot.
+    intents.message_content = True
 
     databaseManager = DatabaseManager(
         dataDir=settings.projectRoot / "data",
         defaultJoinCredits=DEFAULT_JOIN_CREDITS,
         defaultServices=DEFAULT_SERVICES,
+        backend=settings.databaseBackend,
+        databaseUrl=settings.databaseUrl,
     )
     creditService = CreditService(databaseManager)
 
@@ -75,6 +85,15 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             # enabling the privileged Message Content Intent for unused prefix commands.
             super().__init__(intents=intents)
             self.tree = app_commands.CommandTree(self)
+            self.inviteUsage: dict[int, dict[str, int]] = {}
+            self.backupService = PerServerBackupService(
+                databaseManager,
+                recipientUserId=settings.backupUserId,
+                encryptionPassword=settings.backupEncryptionPassword,
+            )
+            self.backupTask: asyncio.Task | None = None
+            self._closeStarted = False
+            self._startupStatusNotified: set[int] = set()
 
         async def setup_hook(self) -> None:
             await SetupViews(self, databaseManager)
@@ -91,6 +110,11 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 syncedCommands = await self.tree.sync()
                 logger.info("Synced %s global slash commands", len(syncedCommands))
             self.resolutionExpiryTask = asyncio.create_task(self.ResolutionExpiryLoop())
+            if settings.backupUserId and settings.backupEncryptionPassword:
+                self.backupTask = asyncio.create_task(self.backupService.HourlyLoop(self))
+                logger.info("Per-server encrypted database backups enabled; recipient ID=%s", settings.backupUserId)
+            else:
+                logger.warning("Automated DM backups are disabled: set BACKUP_DISCORD_USER_ID and BACKUP_ENCRYPTION_PASSWORD in private-configs/credentials.env or hosting secrets.")
 
         async def ResolutionExpiryLoop(self) -> None:
             """Expire unconfirmed completion/cancellation proposals after 15 minutes."""
@@ -99,6 +123,14 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 for guild in list(self.guilds):
                     try:
                         guildDatabase = databaseManager.ForServer(guild.id)
+                        expiredInviteEvent = guildDatabase.ExpireInviteEventIfDue()
+                        if expiredInviteEvent is not None:
+                            eventEmbed = discord.Embed(
+                                title="⏰ Invite reward event expired",
+                                description=f"Invite event #{int(expiredInviteEvent['event_id'])} expired automatically. New joins will no longer earn rewards from that event.",
+                                color=discord.Color.orange(), timestamp=discord.utils.utcnow(),
+                            )
+                            await SendAuditLog(guild, guildDatabase, eventEmbed)
                         expiredTickets = guildDatabase.ExpireStaleResolutionRequests(15)
                         for ticketId, channelId, resolutionType, resolutionMessageId in expiredTickets:
                             channel = guild.get_channel(channelId) if channelId else None
@@ -126,6 +158,9 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 await asyncio.sleep(60)
 
         async def close(self) -> None:
+            if self._closeStarted:
+                return
+            self._closeStarted = True
             task = getattr(self, "resolutionExpiryTask", None)
             if task is not None:
                 task.cancel()
@@ -133,6 +168,33 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                     await task
                 except asyncio.CancelledError:
                     pass
+            backupTask = getattr(self, "backupTask", None)
+            if backupTask is not None:
+                backupTask.cancel()
+                try:
+                    await backupTask
+                except asyncio.CancelledError:
+                    pass
+                try:
+                    await self.backupService.BackupAllServers(self)
+                except Exception:
+                    logger.exception("Final graceful-shutdown backup failed")
+            # A forced process kill may skip this entirely. When the host sends
+            # SIGTERM or an Administrator closes the client cleanly, leave a
+            # status entry in each server's configured audit channel.
+            for guild in list(self.guilds):
+                try:
+                    guildDatabase = databaseManager.ForServer(guild.id)
+                    if not (guildDatabase.GetSetting("audit_log_channel_id", "") or "").strip():
+                        continue
+                    statusEmbed = discord.Embed(
+                        title="⏹️ BloxAssist is shutting down",
+                        description="The bot received a graceful shutdown request and is closing its Discord connection.",
+                        color=discord.Color.orange(), timestamp=discord.utils.utcnow(),
+                    )
+                    await SendAuditLog(guild, guildDatabase, statusEmbed)
+                except Exception:
+                    logger.exception("Could not post graceful-shutdown status: guild=%s", guild.id)
             try:
                 await super().close()
             finally:
@@ -140,10 +202,16 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
 
         async def on_ready(self) -> None:
             logger.info("Logged in as %s (ID: %s)", self.user, self.user.id if self.user else "unknown")
-            logger.info("Per-server database directory: %s", settings.projectRoot / "data" / "servers")
-            # Persistent views are registered in setup_hook. Refresh saved messages as well,
-            # recreating a deleted panel when its configured channel still exists.
+            logger.info("Per-server database directory: %s", settings.projectRoot / "data" / "servers" if settings.databaseBackend == "sqlite" else "PostgreSQL per-server schemas")
+            # Restore invite-use snapshots on each gateway ready/resume. Attribution is
+            # intentionally skipped when the initial uses snapshot is unavailable.
             for guild in self.guilds:
+                try:
+                    inviteUses = await FetchInviteUseCounts(guild)
+                    if inviteUses is not None:
+                        self.inviteUsage[guild.id] = inviteUses
+                except Exception:
+                    logger.exception("Could not initialize invite tracking for guild %s", guild.id)
                 try:
                     await RestoreSavedDashboardMessage(guild, databaseManager)
                     from .tickets.ticket_views import RefreshHelpCenterPanel, RefreshOpenTicketViews
@@ -151,6 +219,22 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                     await RefreshOpenTicketViews(guild, databaseManager)
                 except Exception:
                     logger.exception("Could not restore saved bot panels for guild %s", guild.id)
+                if guild.id not in self._startupStatusNotified:
+                    try:
+                        guildDatabase = databaseManager.ForServer(guild.id)
+                        if (guildDatabase.GetSetting("audit_log_channel_id", "") or "").strip():
+                            statusEmbed = discord.Embed(
+                                title="✅ BloxAssist is online",
+                                description="The bot connected to Discord and completed its startup ready event.",
+                                color=discord.Color.green(), timestamp=discord.utils.utcnow(),
+                            )
+                            await SendAuditLog(guild, guildDatabase, statusEmbed)
+                    except Exception:
+                        logger.exception("Could not post startup status: guild=%s", guild.id)
+                    finally:
+                        # on_ready can run again after a gateway resume; don't send
+                        # duplicate status pings for the same process lifetime.
+                        self._startupStatusNotified.add(guild.id)
 
         async def on_disconnect(self) -> None:
             logger.warning("Discord Gateway disconnected; waiting for reconnection.")
@@ -161,7 +245,24 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         async def on_guild_join(self, guild: discord.Guild) -> None:
             # Create/seed this server's database as soon as the bot joins it.
             databaseManager.ForServer(guild.id)
+            inviteUses = await FetchInviteUseCounts(guild)
+            if inviteUses is not None:
+                self.inviteUsage[guild.id] = inviteUses
             logger.info("Initialized database for newly joined guild %s (%s)", guild.name, guild.id)
+
+        async def on_invite_create(self, invite: discord.Invite) -> None:
+            if invite.guild is None:
+                return
+            inviteUses = await FetchInviteUseCounts(invite.guild)
+            if inviteUses is not None:
+                self.inviteUsage[invite.guild.id] = inviteUses
+
+        async def on_invite_delete(self, invite: discord.Invite) -> None:
+            if invite.guild is None:
+                return
+            inviteUses = await FetchInviteUseCounts(invite.guild)
+            if inviteUses is not None:
+                self.inviteUsage[invite.guild.id] = inviteUses
 
         async def on_member_join(self, member: discord.Member) -> None:
             guildDatabase = databaseManager.ForServer(member.guild.id)
@@ -172,6 +273,41 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                     "Created member account: guild=%s member=%s starting_credits=%s",
                     member.guild.id, member.id, startingCredits,
                 )
+            # Attribution requires the Manage Server permission so the bot can read invite use counts.
+            previousUses = self.inviteUsage.get(member.guild.id)
+            try:
+                liveInvites = await member.guild.invites()
+                currentUses = {str(invite.code): int(invite.uses or 0) for invite in liveInvites}
+                usedInvite = FindUsedInvite(liveInvites, previousUses or {}) if previousUses is not None else None
+                self.inviteUsage[member.guild.id] = currentUses
+            except discord.Forbidden:
+                logger.warning("Invite rewards cannot attribute joins in guild %s; grant Manage Server to the bot if desired", member.guild.id)
+                return
+            except discord.HTTPException:
+                logger.exception("Could not inspect invite uses on member join: guild=%s member=%s", member.guild.id, member.id)
+                return
+            if usedInvite is None or usedInvite.inviter is None or usedInvite.inviter.bot:
+                return
+            event = guildDatabase.GetActiveInviteEvent()
+            if event is None:
+                return
+            status, newBalance, reward = guildDatabase.AwardInviteReward(
+                int(event["event_id"]), member.id, usedInvite.inviter.id, str(usedInvite.code)
+            )
+            if status == "awarded":
+                rewardEmbed = discord.Embed(
+                    title="🎟️ Invite reward awarded",
+                    description=f"<@{usedInvite.inviter.id}> received **{reward:,} credits** for inviting <@{member.id}>.",
+                    color=discord.Color.green(), timestamp=discord.utils.utcnow(),
+                )
+                rewardEmbed.add_field(name="Invite event", value=f"#{int(event['event_id'])}", inline=True)
+                rewardEmbed.add_field(name="New inviter balance", value=f"{int(newBalance or 0):,} credits", inline=True)
+                rewardEmbed.add_field(name="Invite code", value=f"`{usedInvite.code}`", inline=True)
+                await SendAuditLog(member.guild, guildDatabase, rewardEmbed)
+                try:
+                    await usedInvite.inviter.send(f"🎟️ You earned **{reward:,} credits** in **{member.guild.name}** for inviting a new member during invite event #{int(event['event_id'])}.")
+                except discord.HTTPException:
+                    logger.info("Could not DM inviter %s about reward in guild %s", usedInvite.inviter.id, member.guild.id)
 
     bot = CreditBot()
 
@@ -383,6 +519,14 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             await EditEphemeralOriginalResponse(interaction, content=f"Credit addition was not applied (status: {status}).")
             return
         await EditEphemeralOriginalResponse(interaction, content=f"✅ Added **{amount:,} credits** to {member.mention}. New balance: **{newBalance:,}**.\nReason: {reason.strip() if reason and reason.strip() else 'Not provided'}")
+        auditEmbed = discord.Embed(title="💰 Credit balance changed", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+        auditEmbed.add_field(name="Action", value="Add credits", inline=True)
+        auditEmbed.add_field(name="Member", value=f"{member.mention} (`{member.id}`)", inline=False)
+        auditEmbed.add_field(name="Changed by", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        auditEmbed.add_field(name="Change", value=f"+{amount:,} credits", inline=True)
+        auditEmbed.add_field(name="New balance", value=f"{newBalance:,} credits", inline=True)
+        auditEmbed.add_field(name="Reason", value=(reason.strip() if reason and reason.strip() else "Not provided")[:1000], inline=False)
+        await SendAuditLog(interaction.guild, db, auditEmbed)
         logger.info("Server-owner credit add: guild=%s actor=%s target=%s amount=%s reason=%r", interaction.guild_id, interaction.user.id, member.id, amount, reason)
 
     @bot.tree.command(name="deduct", description="Server owner only: deduct credits from a member with an audit record.")
@@ -424,7 +568,199 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             await EditEphemeralOriginalResponse(interaction, content=f"Credit deduction was not applied (status: {status}).")
             return
         await EditEphemeralOriginalResponse(interaction, content=f"✅ Deducted **{amount:,} credits** from {member.mention}. New balance: **{newBalance:,}**.\nReason: {reason.strip() if reason and reason.strip() else 'Not provided'}")
+        auditEmbed = discord.Embed(title="💰 Credit balance changed", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+        auditEmbed.add_field(name="Action", value="Deduct credits", inline=True)
+        auditEmbed.add_field(name="Member", value=f"{member.mention} (`{member.id}`)", inline=False)
+        auditEmbed.add_field(name="Changed by", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        auditEmbed.add_field(name="Change", value=f"-{amount:,} credits", inline=True)
+        auditEmbed.add_field(name="New balance", value=f"{newBalance:,} credits", inline=True)
+        auditEmbed.add_field(name="Reason", value=(reason.strip() if reason and reason.strip() else "Not provided")[:1000], inline=False)
+        await SendAuditLog(interaction.guild, db, auditEmbed)
         logger.info("Server-owner credit deduct: guild=%s actor=%s target=%s amount=%s reason=%r", interaction.guild_id, interaction.user.id, member.id, amount, reason)
+
+    inviteEventGroup = app_commands.Group(
+        name="invite-event",
+        description="Start or end timed invite reward events for this server.",
+    )
+
+    @inviteEventGroup.command(name="start", description="Start an invite reward event with a reward and duration.")
+    @app_commands.guild_only()
+    @app_commands.describe(reward_credits="Credits per eligible invite (defaults to the Admin Dashboard value)", duration_minutes="Duration in minutes, max 7 days (defaults to the Admin Dashboard value)")
+    async def StartInviteRewardEvent(interaction: discord.Interaction, reward_credits: app_commands.Range[int, 0, 1_000_000_000] | None = None, duration_minutes: app_commands.Range[int, 1, 10080] | None = None) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        if not HasConfiguredStaffAccess(interaction, databaseManager):
+            await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can start invite reward events.", ephemeral=True)
+            return
+        if not interaction.guild.me or not interaction.guild.me.guild_permissions.manage_guild:
+            await SendEphemeralResponse(interaction, "Invite tracking requires the bot to have the Manage Server permission so it can compare invite use counts.", ephemeral=True)
+            return
+        db = databaseManager.ForServer(interaction.guild_id)
+        inviteRewardsEnabled = (db.GetSetting("invite_rewards_enabled", "false") or "false").lower() in {"true", "1", "yes", "on"}
+        if not inviteRewardsEnabled:
+            await SendEphemeralResponse(interaction, "Invite rewards are disabled in the Admin Dashboard. An Administrator must enable them before starting an event.", ephemeral=True)
+            return
+        # Dashboard values are defaults; an explicit command argument overrides them.
+        savedReward = db.GetSetting("invite_reward_credits", "50") or "50"
+        savedDuration = db.GetSetting("invite_duration_minutes", "60") or "60"
+        try:
+            rewardAmount = int(reward_credits if reward_credits is not None else savedReward)
+            durationAmount = int(duration_minutes if duration_minutes is not None else savedDuration)
+            if not 0 <= rewardAmount <= 1_000_000_000:
+                raise ValueError("Reward must be between 0 and 1,000,000,000 credits.")
+            if not 1 <= durationAmount <= 10_080:
+                raise ValueError("Duration must be between 1 minute and 7 days.")
+            status, eventId, endsAt = db.StartInviteEvent(rewardAmount, durationAmount, interaction.user.id)
+        except Exception:
+            logger.exception("Could not start invite reward event: guild=%s actor=%s", interaction.guild_id, interaction.user.id)
+            await SendEphemeralResponse(interaction, "The invite event could not be started. Check the database logs and try again.", ephemeral=True)
+            return
+        if status == "already_active":
+            await SendEphemeralResponse(interaction, f"Invite event #{eventId} is already active. End it before starting another.", ephemeral=True)
+            return
+        embed = discord.Embed(title="🎟️ Invite reward event started", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Event ID", value=f"#{eventId}", inline=True)
+        embed.add_field(name="Reward per eligible join", value=f"{rewardAmount:,} credits", inline=True)
+        embed.add_field(name="Duration", value=f"{durationAmount} minute(s)", inline=True)
+        embed.add_field(name="Ends at (UTC)", value=str(endsAt), inline=False)
+        await SendEphemeralResponse(interaction, f"✅ Started invite reward event #{eventId}. It ends automatically at {endsAt}.", ephemeral=True)
+        await SendAuditLog(interaction.guild, db, embed)
+        currentInvites = await FetchInviteUseCounts(interaction.guild)
+        if currentInvites is not None:
+            bot.inviteUsage[interaction.guild.id] = currentInvites
+
+    @inviteEventGroup.command(name="end", description="End the active invite reward event now.")
+    @app_commands.guild_only()
+    async def EndInviteRewardEvent(interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        if not HasConfiguredStaffAccess(interaction, databaseManager):
+            await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can end invite reward events.", ephemeral=True)
+            return
+        db = databaseManager.ForServer(interaction.guild_id)
+        status, event = db.EndInviteEvent(endedBy=interaction.user.id)
+        if status == "none_active" or event is None:
+            await SendEphemeralResponse(interaction, "There is no active invite reward event to end.", ephemeral=True)
+            return
+        embed = discord.Embed(title="🛑 Invite reward event ended", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Event ID", value=f"#{int(event['event_id'])}", inline=True)
+        embed.add_field(name="Reward per eligible join", value=f"{int(event['reward_credits']):,} credits", inline=True)
+        embed.add_field(name="Ended by", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        await SendEphemeralResponse(interaction, f"✅ Invite reward event #{int(event['event_id'])} ended. New joins will no longer earn its reward.", ephemeral=True)
+        await SendAuditLog(interaction.guild, db, embed)
+
+    bot.tree.add_command(inviteEventGroup)
+
+    @bot.tree.command(name="ticket-history", description="Staff only: review a member's retained ticket history.")
+    @app_commands.guild_only()
+    @app_commands.describe(member="The member whose tickets you want to review", limit="Number of recent tickets to show (1–10)")
+    async def TicketHistory(interaction: discord.Interaction, member: discord.Member, limit: app_commands.Range[int, 1, 10] = 10) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        db = databaseManager.ForServer(interaction.guild_id)
+        if not HasConfiguredStaffAccess(interaction, databaseManager):
+            await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can view ticket history.", ephemeral=True)
+            return
+        rows = db.ListTicketHistoryForMember(member.id, int(limit))
+        embed = discord.Embed(title=f"📚 Ticket history · {member}", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        embed.description = f"Member ID: `{member.id}`\nShowing {len(rows)} most recent matching ticket(s). The database retains ticket/transaction metadata even after the ticket channel is deleted."
+        for row in rows[:10]:
+            ticketNumber = int(row["ticket_number"] or 0)
+            ticketLabel = TicketLabelFromRow(row)
+            helpers = db._ParseIdCsv(str(row["helper_ids"] or ""))
+            value = (f"Status: **{row['status']}** · Event key: `{row['event_key']}`\n"
+                     f"Requester: <@{int(row['creator_id'])}> · Helpers: " + (", ".join(f"<@{x}>" for x in helpers) or "none") +
+                     f"\nReserved: {int(row['reserved_credits']):,} credits · Created: {row['created_at']}")
+            transcriptChannelId = row["transcript_channel_id"] if "transcript_channel_id" in row.keys() else None
+            transcriptMessageId = row["transcript_message_id"] if "transcript_message_id" in row.keys() else None
+            if transcriptChannelId and transcriptMessageId:
+                value += f"\n[Open transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
+            else:
+                value += "\nTranscript link: unavailable (no successfully saved transcript was recorded)."
+            embed.add_field(name=f"Ticket #{ticketLabel} · Database ID {int(row['ticket_id'])}", value=value[:1024], inline=False)
+        if not rows:
+            embed.description += "\nNo retained ticket records matched this member."
+        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="scam-reports", description="Staff only: list unresolved scam reports and their supporting ticket history.")
+    @app_commands.guild_only()
+    @app_commands.describe(limit="Number of recent open reports to show (1–5; Discord embed limits)")
+    async def ScamReports(interaction: discord.Interaction, limit: app_commands.Range[int, 1, 5] = 5) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        if not HasConfiguredStaffAccess(interaction, databaseManager):
+            await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can review scam reports.", ephemeral=True)
+            return
+        db = databaseManager.ForServer(interaction.guild_id)
+        rows = db.ListScamReports(status="open", limit=int(limit))
+        embed = discord.Embed(title="🚨 Open scam reports", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+        if not rows:
+            embed.description = "There are no open scam reports."
+        else:
+            embed.description = "Use `/scam-review` to mark a report confirmed or dismissed after checking the linked transcript history in the Audit Log Channel."
+            for row in rows[:10]:
+                reportedUserId = int(row["reported_user_id"])
+                relatedTickets = db.ListTicketHistoryForMember(reportedUserId, limit=2)
+                relatedLinks = []
+                for ticketRow in relatedTickets:
+                    ticketNumber = int(ticketRow["ticket_number"] or 0)
+                    ticketLabel = TicketLabelFromRow(ticketRow)
+                    transcriptChannelId = ticketRow["transcript_channel_id"] if "transcript_channel_id" in ticketRow.keys() else None
+                    transcriptMessageId = ticketRow["transcript_message_id"] if "transcript_message_id" in ticketRow.keys() else None
+                    if transcriptChannelId and transcriptMessageId:
+                        relatedLinks.append(
+                            f"[ticket-{ticketLabel} transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
+                        )
+                    elif str(ticketRow["status"]) == "open" and ticketRow["channel_id"]:
+                        relatedLinks.append(
+                            f"[ticket-{ticketLabel} open channel](https://discord.com/channels/{interaction.guild_id}/{int(ticketRow['channel_id'])})"
+                        )
+                linksText = "\n".join(relatedLinks) if relatedLinks else "No transcript/open ticket links found for this member."
+                embed.add_field(
+                    name=f"Report #{int(row['report_id'])} · {str(row['created_at'])}",
+                    value=(f"Reported: <@{reportedUserId}> (`{reportedUserId}`)\n"
+                           f"Reporter: <@{int(row['reporter_user_id'])}> (`{int(row['reporter_user_id'])}`)\n"
+                           f"Details: {str(row['details'])[:300]}\n"
+                           f"Related ticket history: {linksText}"),
+                    inline=False,
+                )
+        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="scam-review", description="Staff only: mark an open scam report confirmed or dismissed.")
+    @app_commands.guild_only()
+    @app_commands.describe(report_id="The report number shown by /scam-reports", decision="Outcome after checking evidence", note="Optional moderation note")
+    @app_commands.choices(decision=[
+        app_commands.Choice(name="Confirm scam", value="confirmed"),
+        app_commands.Choice(name="Dismiss report", value="dismissed"),
+    ])
+    async def ScamReview(interaction: discord.Interaction, report_id: app_commands.Range[int, 1, 2_147_483_647], decision: app_commands.Choice[str], note: str | None = None) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        if not HasConfiguredStaffAccess(interaction, databaseManager):
+            await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can review scam reports.", ephemeral=True)
+            return
+        db = databaseManager.ForServer(interaction.guild_id)
+        try:
+            changed = db.ResolveScamReport(int(report_id), interaction.user.id, decision.value, note or "")
+        except ValueError as error:
+            await SendEphemeralResponse(interaction, str(error), ephemeral=True)
+            return
+        if not changed:
+            await SendEphemeralResponse(interaction, f"Report #{int(report_id)} was not found as an open report. It may already have been reviewed.", ephemeral=True)
+            return
+        outcomeText = "confirmed as a scam" if decision.value == "confirmed" else "dismissed"
+        await SendEphemeralResponse(interaction, f"✅ Report #{int(report_id)} marked **{outcomeText}**.", ephemeral=True)
+        embed = discord.Embed(title="🛡️ Scam report reviewed", color=discord.Color.orange() if decision.value == "dismissed" else discord.Color.red(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Report", value=f"#{int(report_id)}", inline=True)
+        embed.add_field(name="Decision", value=outcomeText, inline=True)
+        embed.add_field(name="Reviewed by", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        embed.add_field(name="Moderator note", value=(note.strip()[:1000] if note and note.strip() else "Not provided"), inline=False)
+        await SendAuditLog(interaction.guild, db, embed)
 
     replacementAdminGroup = app_commands.Group(
         name="admin_helper-replace",

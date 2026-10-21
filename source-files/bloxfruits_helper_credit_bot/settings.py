@@ -34,21 +34,54 @@ class RuntimeSettings:
     envFile: Path
     discordToken: str
     commandGuildId: int | None
+    databaseBackend: str = "sqlite"
+    databaseUrl: str = ""
+    backupUserId: int | None = None
+    backupEncryptionPassword: str = ""
 
 
 def LoadRuntimeSettings() -> RuntimeSettings:
-    """Load the local tokens.env file without committing its real contents."""
+    """Load private credentials; keep the actual credentials.env out of Git."""
     projectRoot = Path(__file__).resolve().parents[2]
-    envFile = projectRoot / "private-configs" / "tokens.env"
-    load_dotenv(envFile, override=True)
+    # The general credentials.env replaces tokens.env. Older paths remain as
+    # read-only compatibility fallbacks so existing deployments continue to start.
+    credentialsFile = projectRoot / "private-configs" / "credentials.env"
+    runtimeEnvFile = projectRoot / "private-configs" / "runtime.env"
+    legacyEnvFile = projectRoot / "private-configs" / "tokens.env"
+    if credentialsFile.is_file():
+        envFile = credentialsFile
+    elif runtimeEnvFile.is_file():
+        envFile = runtimeEnvFile
+    elif legacyEnvFile.is_file():
+        envFile = legacyEnvFile
+    else:
+        # Keep first-run instructions and missing-token errors pointed at the
+        # current filename even when the user has not copied the example yet.
+        envFile = credentialsFile
+    # Host-provided environment variables take precedence on managed hosts.
+    # Local values still load from credentials.env when no process value exists.
+    load_dotenv(envFile, override=False)
 
     discordToken = os.getenv("DISCORD_TOKEN", "").strip()
     guildIdText = os.getenv("GUILD_ID", "").strip()
     commandGuildId = int(guildIdText) if guildIdText else None
+    databaseBackend = os.getenv("DATABASE_BACKEND", "sqlite").strip().lower() or "sqlite"
+    if databaseBackend not in {"sqlite", "postgresql"}:
+        raise ValueError("DATABASE_BACKEND must be 'sqlite' or 'postgresql'.")
+    databaseUrl = os.getenv("DATABASE_URL", "").strip()
+    if databaseBackend == "postgresql" and not databaseUrl:
+        raise ValueError("DATABASE_URL is required when DATABASE_BACKEND=postgresql.")
+    backupUserText = os.getenv("BACKUP_DISCORD_USER_ID", "").strip()
+    backupUserId = int(backupUserText) if backupUserText else None
+    backupEncryptionPassword = os.getenv("BACKUP_ENCRYPTION_PASSWORD", "").strip()
 
     return RuntimeSettings(
         projectRoot=projectRoot,
         envFile=envFile,
         discordToken=discordToken,
         commandGuildId=commandGuildId,
+        databaseBackend=databaseBackend,
+        databaseUrl=databaseUrl,
+        backupUserId=backupUserId,
+        backupEncryptionPassword=backupEncryptionPassword,
     )

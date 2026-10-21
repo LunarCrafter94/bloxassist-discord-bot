@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from typing import Any
 
 import discord
@@ -12,6 +13,30 @@ EPHEMERAL_MESSAGE_TTL_SECONDS = 60
 _logger = logging.getLogger(__name__)
 _cleanupTasks: set[asyncio.Task[Any]] = set()
 _originalResponseTasks: dict[int, asyncio.Task[Any]] = {}
+_expiredInteractionIds: set[int] = set()
+_expiredInteractionOrder: deque[int] = deque()
+_EXPIRED_INTERACTION_CACHE_LIMIT = 512
+
+
+def _IsExpiredInteraction(interaction: discord.Interaction) -> bool:
+    return int(interaction.id) in _expiredInteractionIds
+
+
+def _MarkExpiredInteraction(interaction: discord.Interaction, action: str, error: discord.NotFound) -> None:
+    """Remember expired tokens so later response attempts do not add traceback spam."""
+    if getattr(error, "code", None) != 10062:
+        raise error
+    interactionId = int(interaction.id)
+    if interactionId not in _expiredInteractionIds:
+        _expiredInteractionIds.add(interactionId)
+        _expiredInteractionOrder.append(interactionId)
+    while len(_expiredInteractionOrder) > _EXPIRED_INTERACTION_CACHE_LIMIT:
+        oldId = _expiredInteractionOrder.popleft()
+        _expiredInteractionIds.discard(oldId)
+    _logger.warning(
+        "Discord interaction expired before %s could be delivered (interaction=%s); "
+        "the client may need to retry after its connection stabilizes.", action, interactionId,
+    )
 
 
 def _KeepTask(task: asyncio.Task[Any]) -> None:
@@ -73,7 +98,13 @@ async def EditEphemeralOriginalResponse(
     interaction: discord.Interaction, *args: Any, **kwargs: Any
 ) -> Any:
     """Edit an ephemeral original response and restart its one-minute TTL."""
-    message = await interaction.edit_original_response(*args, **kwargs)
+    if _IsExpiredInteraction(interaction):
+        return None
+    try:
+        message = await interaction.edit_original_response(*args, **kwargs)
+    except discord.NotFound as error:
+        _MarkExpiredInteraction(interaction, "editing the response", error)
+        return None
     ScheduleEphemeralOriginalDeletion(interaction)
     return message
 
@@ -84,7 +115,13 @@ async def SendEphemeralResponse(
     """Send an ephemeral original response and remove it after one minute."""
     kwargs.pop("ephemeral", None)
     kwargs.pop("delete_after", None)
-    response = await interaction.response.send_message(*args, ephemeral=True, **kwargs)
+    if _IsExpiredInteraction(interaction):
+        return None
+    try:
+        response = await interaction.response.send_message(*args, ephemeral=True, **kwargs)
+    except discord.NotFound as error:
+        _MarkExpiredInteraction(interaction, "sending an ephemeral response", error)
+        return None
     ScheduleEphemeralOriginalDeletion(interaction)
     return response
 
@@ -94,21 +131,33 @@ async def DeferEphemeralResponse(
 ) -> Any:
     """Defer privately and schedule the original response for automatic cleanup."""
     kwargs.pop("ephemeral", None)
-    response = await interaction.response.defer(*args, ephemeral=True, **kwargs)
+    if _IsExpiredInteraction(interaction):
+        return None
+    try:
+        response = await interaction.response.defer(*args, ephemeral=True, **kwargs)
+    except discord.NotFound as error:
+        _MarkExpiredInteraction(interaction, "deferring the response", error)
+        return None
     ScheduleEphemeralOriginalDeletion(interaction)
     return response
 
 
 async def SendEphemeralFollowup(
     interaction: discord.Interaction, *args: Any, **kwargs: Any
-) -> discord.WebhookMessage:
+) -> discord.WebhookMessage | None:
     """Send a private follow-up and remove it after one minute."""
     kwargs.pop("ephemeral", None)
     kwargs.pop("wait", None)
     kwargs.pop("delete_after", None)
-    message = await interaction.followup.send(
-        *args, ephemeral=True, wait=True, **kwargs
-    )
+    if _IsExpiredInteraction(interaction):
+        return None
+    try:
+        message = await interaction.followup.send(
+            *args, ephemeral=True, wait=True, **kwargs
+        )
+    except discord.NotFound as error:
+        _MarkExpiredInteraction(interaction, "sending a follow-up", error)
+        return None
     _KeepTask(asyncio.create_task(_DeleteWebhookMessageLater(message, EPHEMERAL_MESSAGE_TTL_SECONDS)))
     return message
 
