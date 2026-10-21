@@ -785,11 +785,11 @@ class MainPanelView(discord.ui.View):
             )
         except discord.NotFound as error:
             if getattr(error, "code", None) == 10062:
-                _logger.warning("Scam-report modal interaction expired before delivery: interaction=%s", interaction.id)
+                _logger.warning("Report-form interaction expired before delivery: interaction=%s", interaction.id)
                 return
             raise
         except discord.HTTPException:
-            _logger.exception("Discord rejected the scam-report modal: interaction=%s", interaction.id)
+            _logger.exception("Discord rejected the report form: interaction=%s", interaction.id)
             # A rejected modal has not consumed the initial response, so show a
             # useful fallback instead of allowing the persistent View callback to crash.
             try:
@@ -799,7 +799,7 @@ class MainPanelView(discord.ui.View):
                     ephemeral=True,
                 )
             except discord.HTTPException:
-                _logger.warning("Could not send fallback after modal delivery failure: interaction=%s", interaction.id)
+                _logger.warning("Could not send fallback after report-form delivery failure: interaction=%s", interaction.id)
 
 
 class HelperCountSelect(discord.ui.Select):
@@ -2142,7 +2142,7 @@ def BuildHelpCenterEmbed(guildDatabase: GuildDatabase) -> discord.Embed:
             "Use the buttons below to check your balance or create a help ticket.\n\n"
             "🎫 **Create Ticket** — Request help for a Blox Fruits event.\n"
             "💰 **Balance** — Check your credits in this server.\n"
-            "🚨 **Report Scam** — Send a report to the configured moderation audit channel.\n\n"
+            "📨 **Report Issue** — Report scams, bugs, ticket/credit problems, member misconduct, or other concerns. A member can be selected when relevant.\n\n"
             f"New accounts start with **{guildDatabase.GetDefaultJoinCredits():,} credits**. Existing balances do not change when this value is updated. Event prices are per helper; total reservation = listed price × selected helper count."
         ),
         color=discord.Color.blurple(),
