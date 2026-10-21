@@ -992,10 +992,19 @@ async def CreateTicketChannel(
                     "Ticket created but the configured welcome message could not be sent: guild=%s ticket=%s channel=%s",
                     guild.id, ticketId, channel.id,
                 )
+        # Log the initial reservation immediately. If posting fails, the delivery
+        # marker stays absent so finalization can retry the audit entry later.
+        if ticketId is not None:
+            await AuditTicketCreditTransactions(guild, guildDatabase, ticketId)
     except Exception:
         # If a ticket was recorded but its channel panel failed, refund atomically.
         if ticketId is not None:
-            guildDatabase.RefundTicket(ticketId, note="automatic refund after ticket setup failure")
+            try:
+                guildDatabase.RefundTicket(ticketId, note="automatic refund after ticket setup failure")
+            except Exception:
+                _logger.exception("Could not refund ticket after setup failure: guild=%s ticket=%s", guild.id, ticketId)
+            # Log both the original reservation and any setup-failure refund.
+            await AuditTicketCreditTransactions(guild, guildDatabase, ticketId)
         try:
             await channel.delete(reason="Ticket creation failed; cleanup")
         except discord.HTTPException:
