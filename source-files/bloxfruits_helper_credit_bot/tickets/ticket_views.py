@@ -138,11 +138,6 @@ class ReportScamUserSelect(discord.ui.UserSelect):
 class ReportScamUserSelectView(discord.ui.View):
     """Let reporters select an actual server member instead of typing an ID."""
 
-    def __init__(self, databaseManager: DatabaseManager):
-        super().__init__(timeout=300)
-        self.databaseManager = databaseManager
-        self.selectedMember: discord.Member | None = None
-
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != getattr(self, "reporterId", interaction.user.id):
             await SendEphemeralResponse(
