@@ -10,7 +10,7 @@ A slash-command Discord bot for multi-server ticket support and credit balances.
 
 ## Features
 
-- Public Help Center panel with ticket creation, balances, and a **Report Scam** form.
+- Public Help Center panel with ticket creation, balances, and a **Report Issue** form for scams, bugs, ticket/credit issues, member misconduct, and general concerns. A reported member is optional.
 - Persistent ticket workflow: requester proposes completion/cancellation, active helpers confirm, helpers may leave, and replacement helpers require staff approval.
 - Configurable per-server Admin Dashboard, event catalog, starting credits for new accounts, helper limits, moderator roles, ticket staff policy, Help Center placement, and audit/transcript channel.
 - `/add` and `/deduct` are restricted to the actual server owner and write actor/reason details to the transaction ledger and configured audit channel.
@@ -19,7 +19,7 @@ A slash-command Discord bot for multi-server ticket support and credit balances.
 - Ticket reservations, payouts, unused-slot refunds, refunds, invite rewards, and penalties have individual audit entries where implemented, with actor/reason/ledger details when available.
 - Completed/refunded tickets create text transcripts in the configured audit channel. If the transcript cannot be safely stored, the bot attempts to archive the original channel for moderator-only review rather than deleting the evidence.
 - Active ticket channel numbers are allocated separately and restart at `ticket-001` when no tickets remain open; active ticket channels are never assigned the same label. Permanent transcript identifiers never reset: `Ticket-001` through `Ticket-999`, then `Ticket-1│000`, `Ticket-1│001`, `Ticket-2│000`, and so on. At most **100 tracked transcript posts** remain in the configured audit channel. The database retains the **500 most recent closed tickets with confirmed transcripts**, plus open tickets and closed tickets that still need transcript recovery. Older eligible ticket rows and their per-ticket ledger rows are pruned; current balances, settings, services, and standalone credit-adjustment ledger entries are retained.
-- `/ticket-history` links to retained transcripts. `/scam-reports` lists open reports, and `/scam-review` lets authorized staff mark a report confirmed or dismissed with an audit note.
+- `/ticket-history` links to retained transcripts. `/reports` lists open reports across all categories, and `/report-review` lets authorized staff confirm or dismiss a report with an audit note.
 - Timed invite reward events use `/invite-event start` and `/invite-event end`. The command uses reward/duration defaults configured in the Admin Dashboard unless explicit values are provided. Expiration is checked automatically. Invite attribution requires the bot to have **Manage Server** permission to inspect invite use counts; ambiguous attribution is skipped rather than guessed.
 - Optional encrypted ZIP backups, one ZIP per server, sent to a configured Discord DM after startup and then every five hours, plus a best-effort graceful-shutdown attempt. The configured Audit Log Channel also receives one startup notice per process and a graceful-shutdown notice. A forced kill cannot send a shutdown notice or guarantee the final backup.
 
@@ -46,7 +46,7 @@ Before switching a real deployment, stop the bot and place recoverable SQLite da
 1. Install Python 3.13 or newer, then run `python -m pip install -r requirements.txt`. For Falix, select Python 3.13.
 2. Copy `private-configs/credentials.env.example` to `private-configs/credentials.env` for local use and fill in `DISCORD_TOKEN`. On Falix, use panel environment/secret variables instead of uploading real credentials. Leave `DATABASE_BACKEND=sqlite` for the first host test. Add `DATABASE_URL` only when a PostgreSQL database is ready.
 3. Start locally with `python RunBot.py`. For Falix's Python template, set the Main file to `app.py` if available; that launcher delegates to the existing `RunBot.py` entry point.
-4. In a staff-only channel, run `/setup admin_dashboard`. Set an **Audit Log Channel** where the bot can send messages, embed links, attach files, and read message history. This channel receives ticket transcripts, credit movement audit entries, invite reward logs, and scam reports.
+4. In a staff-only channel, run `/setup admin_dashboard`. Set an **Audit Log Channel** where the bot can send messages, embed links, attach files, and read message history. This channel receives ticket transcripts, credit movement audit entries, invite reward logs, and general moderation reports.
 5. Run `/setup public_tickets` in the public Help Center channel. Test in a development Discord server before using real balances.
 
 For a free host test, see [`docs/falix_free_test.md`](docs/falix_free_test.md). See [`docs/installation_and_operations.md`](docs/installation_and_operations.md) for full environment, permissions, migration, backup, and verification steps; [`docs/backup_and_restore.md`](docs/backup_and_restore.md) for backup/restore details; and [`docs/release_history.md`](docs/release_history.md) for the current change summary and [`docs/changelog-0.9.0.md`](docs/changelog-0.9.0.md) for the full v0.9.0 feature changelog.
