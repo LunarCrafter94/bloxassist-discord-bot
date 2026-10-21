@@ -254,6 +254,7 @@ class GuildDatabase:
                 report_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 reporter_user_id INTEGER NOT NULL,
                 reported_user_id INTEGER NOT NULL,
+                report_type TEXT NOT NULL DEFAULT 'scam',
                 details TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'open',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -268,6 +269,21 @@ class GuildDatabase:
                     statement = statement.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
                     statement = re.sub(r"\bINTEGER\b", "BIGINT", statement)
                 self.connection.execute(statement)
+            # Preserve legacy scam reports while adding a category for generalized reports.
+            if self.backend == "sqlite":
+                reportColumnRows = self.connection.execute("PRAGMA table_info(scam_reports)").fetchall()
+                reportColumns = {str(row["name"]) for row in reportColumnRows}
+            else:
+                reportColumnRows = self.connection.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?",
+                    ("scam_reports",),
+                ).fetchall()
+                reportColumns = {str(row["column_name"]) for row in reportColumnRows}
+            if "report_type" not in reportColumns:
+                self.connection.execute(
+                    "ALTER TABLE scam_reports ADD COLUMN report_type TEXT NOT NULL DEFAULT 'scam'"
+                )
+
             # Add the numbered-ticket column to databases created before this feature.
             if self.backend == "sqlite":
                 ticketColumnRows = self.connection.execute("PRAGMA table_info(tickets)").fetchall()
@@ -1935,18 +1951,38 @@ class GuildDatabase:
             (normalizedId, token, token, token, safeLimit), fetchAll=True,
         )
 
-    def CreateScamReport(self, reporterUserId: int, reportedUserId: int, details: str) -> int:
+    def CreateScamReport(
+        self,
+        reporterUserId: int,
+        reportedUserId: int | None,
+        details: str,
+        *,
+        reportType: str = "scam",
+    ) -> int:
+        """Store a general moderation report; 0 as reported_user_id means no specific member."""
         details = str(details).strip()[:3000]
         if not details:
             raise ValueError("Report details cannot be empty.")
-        if int(reporterUserId) == int(reportedUserId):
+        normalizedReporterId = int(reporterUserId)
+        normalizedReportedId = int(reportedUserId or 0)
+        normalizedType = str(reportType).strip().lower()
+        validTypes = {"scam", "bug", "ticket_credit", "member_behavior", "other"}
+        if normalizedType not in validTypes:
+            raise ValueError("Choose a valid report category.")
+        if normalizedReportedId < 0:
+            raise ValueError("Reported member ID cannot be negative.")
+        if normalizedReportedId and normalizedReporterId == normalizedReportedId:
             raise ValueError("You cannot report yourself.")
         with self.databaseLock:
-            reportSql = "INSERT INTO scam_reports(reporter_user_id, reported_user_id, details) VALUES (?, ?, ?)"
+            reportSql = (
+                "INSERT INTO scam_reports(reporter_user_id, reported_user_id, report_type, details) "
+                "VALUES (?, ?, ?, ?)"
+            )
             if self.backend == "postgresql":
                 reportSql += " RETURNING report_id"
             cursor = self.connection.execute(
-                reportSql, (int(reporterUserId), int(reportedUserId), details),
+                reportSql,
+                (normalizedReporterId, normalizedReportedId, normalizedType, details),
             )
             reportId = int(cursor.fetchone()["report_id"]) if self.backend == "postgresql" else int(cursor.lastrowid)
             self.connection.commit()
