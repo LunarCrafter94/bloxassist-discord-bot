@@ -164,22 +164,30 @@ async def PublishTicketTranscript(
     requesterId = int(ticket["creator_id"])
     helperIds = db._ParseIdCsv(str(ticket["helper_ids"] or ""))
     activeHelperIds = db._ParseIdCsv(str(ticket["active_helper_ids"] or ""))
+
+    def memberDisplayName(userId: int) -> str:
+        member = channel.guild.get_member(int(userId))
+        return member.display_name if member is not None else f"Unknown member ({userId})"
+
+    finalizedBy = (
+        "(system/automatic)"
+        if actorUserId is None
+        else memberDisplayName(int(actorUserId))
+    )
     lines = [
         "BloxAssist Ticket Transcript",
-        f"Server: {channel.guild.name} ({channel.guild.id})",
-        f"Ticket label: ticket-{ticketLabel}",
-        f"Database ticket ID: {ticketId}",
-        f"Final status: {finalStatus}",
-        f"Requester ID: {requesterId}",
-        f"Original helper IDs: {', '.join(map(str, helperIds)) or '(none)' }",
-        f"Active helper IDs at close: {', '.join(map(str, activeHelperIds)) or '(none)' }",
-        f"Event key: {ticket['event_key']}",
-        f"Reserved credits: {ticket['reserved_credits']}",
-        f"Generated: {DateTime.now(timezone.utc).isoformat()}",
-        f"Finalized by user ID: {actorUserId if actorUserId is not None else '(system/automatic)' }",
-        "=" * 80,
-        "MESSAGE HISTORY (oldest first)",
-        "=" * 80,
+        f"Server: {channel.guild.name}",
+        f"Ticket: {ticketLabel}",
+        f"Status: {finalStatus}",
+        f"Requester: {memberDisplayName(requesterId)}",
+        f"Original helpers: {', '.join(memberDisplayName(userId) for userId in helperIds) or '(none)'}",
+        f"Active helpers at close: {', '.join(memberDisplayName(userId) for userId in activeHelperIds) or '(none)'}",
+        f"Credits reserved: {ticket['reserved_credits']}",
+        f"Generated: {DateTime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"Finalized by: {finalizedBy}",
+        "=" * 72,
+        "CONVERSATION (oldest first)",
+        "=" * 72,
     ]
     # Keep the attachment under a conservative 6.5 MB byte limit. Character
     # counts are not sufficient because UTF-8 emoji and non-Latin text can use
@@ -188,11 +196,11 @@ async def PublishTicketTranscript(
     totalBytes = len(("\n".join(lines)).encode("utf-8", errors="replace"))
     try:
         async for message in channel.history(limit=None, oldest_first=True):
-            messageLines = [
-                f"[{message.created_at.isoformat()}] {getattr(message.author, 'display_name', str(message.author))} (user_id={message.author.id})"
-            ]
-            if message.content:
-                messageLines.append(message.content)
+            timestamp = message.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+            authorName = getattr(message.author, "display_name", None) or getattr(message.author, "name", "Unknown user")
+            messageLines = [f"[{timestamp}] {authorName}"]
+            if message.clean_content:
+                messageLines.append(message.clean_content)
             for embedIndex, embedItem in enumerate(message.embeds, start=1):
                 if embedItem.title:
                     messageLines.append(f"[Embed {embedIndex} title] {embedItem.title}")
