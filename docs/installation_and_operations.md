@@ -62,7 +62,7 @@ For Falix, choose Python 3.13 and install dependencies from `requirements.txt`. 
 3. In a public text channel, run `/setup public_tickets`.
 4. Set dashboard moderator roles and ticket-staff baseline access. Only a Discord server Administrator can change the dashboard moderator-role allowlist.
 5. If invite events will be used, enable invite rewards in the dashboard, set default reward/duration, and ensure the bot has `Manage Server`. Test `/invite-event start` and `/invite-event end` in a test server.
-6. Test `/scam-reports` and `/scam-review` from a configured staff account. Scam reports are delivered to the Audit Log Channel and the report row remains in the database.
+6. Test `/reports` and `/report-review` from a configured staff account. General reports are delivered to the Audit Log Channel and remain in the database even if Discord cannot deliver the audit message.
 
 ## 3. Database modes and migration
 
