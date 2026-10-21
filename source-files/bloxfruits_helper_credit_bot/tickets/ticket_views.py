@@ -467,6 +467,47 @@ async def ArchiveTicketChannel(channel: discord.TextChannel, databaseManager: Da
         return False
 
 
+async def AuditTicketCreditTransactions(
+    guild: discord.Guild,
+    guildDatabase: GuildDatabase,
+    ticketId: int,
+) -> None:
+    """Send every unlogged positive credit movement for a ticket to the configured audit channel."""
+    try:
+        ticket = guildDatabase.GetTicketById(ticketId)
+        ticketLabel = TicketLabelFromRow(ticket) if ticket is not None else str(ticketId)
+        for transaction in guildDatabase.GetUnauditedTicketTransactions(ticketId):
+            txType = str(transaction["type"]).replace("_", " ").title()
+            amount = int(transaction["amount"])
+            sourceId = transaction["from_user"]
+            targetId = transaction["to_user"]
+            actorId = transaction["actor_user_id"]
+            direction = (
+                f"<@{int(sourceId)}> → <@{int(targetId)}>"
+                if sourceId is not None and targetId is not None else
+                f"From <@{int(sourceId)}>" if sourceId is not None else
+                f"To <@{int(targetId)}>" if targetId is not None else
+                "Internal ledger movement"
+            )
+            actorText = f"<@{int(actorId)}> (`{int(actorId)}`)" if actorId is not None else "System / automatic workflow"
+            embed = discord.Embed(
+                title=f"💳 Credit transaction · {txType}",
+                description=f"Ticket **#{ticketLabel}** · transaction ID **{int(transaction['id'])}**",
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.add_field(name="Amount", value=f"{amount:,} credits", inline=True)
+            embed.add_field(name="Movement", value=direction, inline=True)
+            embed.add_field(name="Actor", value=actorText, inline=False)
+            embed.add_field(name="Reason / history note", value=str(transaction["note"] or "No reason was recorded.")[:1000], inline=False)
+            embed.add_field(name="Ledger timestamp", value=str(transaction["created_at"])[:100], inline=False)
+            if await SendAuditLog(guild, guildDatabase, embed):
+                guildDatabase.MarkTransactionAuditDelivered(int(transaction["id"]))
+    except Exception:
+        # Audit delivery must never roll back or interrupt a committed credit transaction.
+        _logger.exception("Could not publish ticket credit ledger audit: guild=%s ticket=%s", guild.id, ticketId)
+
+
 async def FinalizeTicketChannel(
     channel: discord.TextChannel, databaseManager: DatabaseManager, ticketId: int, finalStatus: str, notice: str, actorUserId: int | None = None,
 ) -> bool:
@@ -484,28 +525,10 @@ async def FinalizeTicketChannel(
         embed = discord.Embed(title=f"Ticket {finalStatus}", description=f"Ticket #{resolvedLabel} was resolved. A transcript was saved.", color=discord.Color.green())
         embed.add_field(name="Ticket ID", value=str(ticketId))
         embed.add_field(name="Resolved by", value=f"<@{actorUserId}> (`{actorUserId}`)" if actorUserId else "Automatic workflow / system", inline=False)
-        # Show the actual ledger movements and the actor recorded in each transaction,
-        # not only a generic resolution notice. The durable audit trail remains in SQL.
-        movements = db.Execute(
-            "SELECT type, amount, from_user, to_user, actor_user_id, note, created_at "
-            "FROM transactions WHERE ticket_id = ? AND amount > 0 ORDER BY id",
-            (int(ticketId),), fetchAll=True,
-        )
-        movementLines = []
-        for movement in movements:
-            actor = f"<@{int(movement['actor_user_id'])}>" if movement["actor_user_id"] is not None else "System / automatic"
-            recipient = f"to <@{int(movement['to_user'])}>" if movement["to_user"] is not None else ""
-            source = f"from <@{int(movement['from_user'])}>" if movement["from_user"] is not None else ""
-            movementLines.append(
-                f"• **{str(movement['type']).replace('_', ' ').title()}**: {int(movement['amount']):,} credits {source} {recipient} · actor {actor}\n"
-                f"  {str(movement['note'] or 'No note')[:150]} · {movement['created_at']}"
-            )
-        embed.add_field(
-            name="Credit movement audit",
-            value=("\n".join(movementLines)[:1024] if movementLines else "No positive-amount credit movement was recorded for this ticket."),
-            inline=False,
-        )
         await SendAuditLog(channel.guild, db, embed)
+        # Send each credit movement as its own embed so history, actors, and reasons
+        # are never silently truncated by Discord's 1,024-character field limit.
+        await AuditTicketCreditTransactions(channel.guild, db, ticketId)
     else:
         archived = await ArchiveTicketChannel(channel, databaseManager, ticketId, "transcript could not be confirmed")
         if not archived:
