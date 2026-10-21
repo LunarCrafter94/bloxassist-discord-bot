@@ -235,6 +235,15 @@ class GuildDatabase:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS invite_attributions (
+                invited_user_id INTEGER PRIMARY KEY,
+                inviter_user_id INTEGER NOT NULL,
+                invite_code TEXT NOT NULL DEFAULT '',
+                penalty_applied INTEGER NOT NULL DEFAULT 0 CHECK (penalty_applied IN (0, 1)),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS scam_reports (
                 report_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 reporter_user_id INTEGER NOT NULL,
@@ -596,6 +605,33 @@ class GuildDatabase:
             except Exception:
                 self.connection.rollback()
                 raise
+
+    def RecordInviteAttribution(self, invitedUserId: int, inviterUserId: int, inviteCode: str) -> bool:
+        """Remember who invited a member, independently of whether an invite event is active."""
+        invitedId, inviterId = int(invitedUserId), int(inviterUserId)
+        if invitedId <= 0 or inviterId <= 0 or invitedId == inviterId:
+            return False
+        with self.databaseLock:
+            cursor = self.connection.execute(
+                """INSERT INTO invite_attributions(invited_user_id, inviter_user_id, invite_code)
+                   VALUES (?, ?, ?) ON CONFLICT(invited_user_id) DO NOTHING""",
+                (invitedId, inviterId, str(inviteCode)[:100]),
+            )
+            return cursor.rowcount == 1
+
+    def GetInviteAttribution(self, invitedUserId: int):
+        return self.Execute(
+            "SELECT * FROM invite_attributions WHERE invited_user_id = ? AND penalty_applied = 0",
+            (int(invitedUserId),), fetchOne=True,
+        )
+
+    def MarkInviteLeavePenaltyApplied(self, invitedUserId: int) -> bool:
+        with self.databaseLock:
+            cursor = self.connection.execute(
+                "UPDATE invite_attributions SET penalty_applied = 1 WHERE invited_user_id = ? AND penalty_applied = 0",
+                (int(invitedUserId),),
+            )
+            return cursor.rowcount == 1
 
     def GetCreditDebt(self, userId: int) -> int:
         row = self.Execute("SELECT amount FROM credit_debts WHERE user_id = ?", (int(userId),), fetchOne=True)
