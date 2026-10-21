@@ -1066,6 +1066,7 @@ class GuildDatabase:
                    VALUES (?) ON CONFLICT(transaction_id) DO NOTHING""",
                 (int(transactionId),),
             )
+            self.connection.commit()
 
     def GetTicketById(self, ticketId: int):
         return self.Execute(
