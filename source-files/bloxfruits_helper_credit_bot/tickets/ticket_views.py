@@ -68,6 +68,15 @@ def IsConfiguredTicketStaff(interaction: discord.Interaction, guildDatabase: Gui
     return bool(permittedRoleIds.intersection(memberRoleIds))
 
 
+REPORT_CATEGORY_LABELS = {
+    "scam": "Scam / Fraud",
+    "bug": "Bug / Bot Issue",
+    "ticket_credit": "Ticket / Credit Issue",
+    "member_behavior": "Member Misconduct",
+    "other": "Other / General Issue",
+}
+
+
 class ReportScamUserIdModal(discord.ui.Modal, title="Report by User ID"):
     reportedMember = discord.ui.TextInput(
         label="Reported member (mention or user ID)",
@@ -76,9 +85,16 @@ class ReportScamUserIdModal(discord.ui.Modal, title="Report by User ID"):
         max_length=40,
     )
 
-    def __init__(self, databaseManager: DatabaseManager):
+    def __init__(
+        self,
+        databaseManager: DatabaseManager,
+        reportType: str = "other",
+        sourceInteraction: discord.Interaction | None = None,
+    ):
         super().__init__(timeout=300)
         self.databaseManager = databaseManager
+        self.reportType = reportType
+        self.sourceInteraction = sourceInteraction
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
@@ -104,20 +120,79 @@ class ReportScamUserIdModal(discord.ui.Modal, title="Report by User ID"):
             )
             return
         await interaction.response.send_modal(
-            ReportScamModal(self.databaseManager, reportedId)
+            ReportScamModal(
+                self.databaseManager,
+                reportedId,
+                reportType=self.reportType,
+                sourceInteraction=self.sourceInteraction,
+            )
         )
+
+
+class ReportCategorySelect(discord.ui.Select):
+    def __init__(self, parent: "ReportScamUserSelectView"):
+        options = [
+            discord.SelectOption(
+                label="Scam / Fraud",
+                value="scam",
+                description="Scams, impersonation, or dishonest trades.",
+                emoji="🚨",
+            ),
+            discord.SelectOption(
+                label="Bug / Bot Issue",
+                value="bug",
+                description="Broken commands, bugs, or unexpected behavior.",
+                emoji="🐛",
+            ),
+            discord.SelectOption(
+                label="Ticket / Credit Issue",
+                value="ticket_credit",
+                description="Ticket problems, balances, payments, or refunds.",
+                emoji="💳",
+            ),
+            discord.SelectOption(
+                label="Member Misconduct",
+                value="member_behavior",
+                description="Harassment, rule violations, or other member concerns.",
+                emoji="🛡️",
+            ),
+            discord.SelectOption(
+                label="Other / General Issue",
+                value="other",
+                description="Anything else moderators should review.",
+                emoji="📨",
+                default=True,
+            ),
+        ]
+        super().__init__(
+            placeholder="Choose a report category",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+            custom_id="bf:report_category",
+        )
+        self.parentView = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.parentView.CategorySelected(interaction, self.values[0])
 
 
 class ReportScamUserSelect(discord.ui.UserSelect):
     def __init__(self, parent: "ReportScamUserSelectView"):
         super().__init__(
-            placeholder="Choose the member you want to report",
-            min_values=1,
+            placeholder="Optional: select a member involved",
+            min_values=0,
             max_values=1,
+            row=1,
+            custom_id="bf:report_member",
         )
         self.parentView = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if not self.values:
+            await self.parentView.MemberCleared(interaction)
+            return
         selected = self.values[0]
         if not isinstance(selected, discord.Member):
             await SendEphemeralResponse(
@@ -136,7 +211,7 @@ class ReportScamUserSelect(discord.ui.UserSelect):
 
 
 class ReportScamUserSelectView(discord.ui.View):
-    """Let reporters select an actual server member instead of typing an ID."""
+    """Select a report category and, optionally, a member related to the report."""
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != getattr(self, "reporterId", interaction.user.id):
@@ -150,116 +225,219 @@ class ReportScamUserSelectView(discord.ui.View):
         self, interaction: discord.Interaction, error: Exception,
         item: discord.ui.Item, /
     ) -> None:
-        _logger.exception("Error in scam-report member picker", exc_info=error)
+        _logger.exception("Error in report member picker", exc_info=error)
         if not interaction.response.is_done():
             await SendEphemeralResponse(
-                interaction, "The member picker failed. Use **Enter User ID Instead**.", ephemeral=True
+                interaction, "The member picker failed. You can leave the member blank for a general report.", ephemeral=True
             )
 
     def __init__(self, databaseManager: DatabaseManager, reporterId: int | None = None):
         super().__init__(timeout=300)
         self.databaseManager = databaseManager
         self.reporterId = reporterId
+        self.reportType = "other"
         self.selectedMember: discord.Member | None = None
+        self.sourceInteraction: discord.Interaction | None = None
+        # Rows make the category and optional member selectors appear above all buttons.
+        self.add_item(ReportCategorySelect(self))
         self.add_item(ReportScamUserSelect(self))
+
+    def _PromptText(self) -> str:
+        categoryLabel = REPORT_CATEGORY_LABELS.get(self.reportType, "Other / General Issue")
+        memberText = f"**{self.selectedMember.display_name}**" if self.selectedMember else "No specific member"
+        return (
+            f"**Category:** {categoryLabel}\n"
+            f"**Member:** {memberText}\n\n"
+            "Choose a category and optionally select a member, then press **Continue** below. "
+            "For bugs or general issues, leave the member selector blank."
+        )
+
+    async def CategorySelected(self, interaction: discord.Interaction, reportType: str) -> None:
+        self.reportType = reportType if reportType in REPORT_CATEGORY_LABELS else "other"
+        self.sourceInteraction = self.sourceInteraction or interaction
+        await interaction.response.edit_message(content=self._PromptText(), view=self)
 
     async def MemberSelected(
         self, interaction: discord.Interaction, selected: discord.Member
     ) -> None:
         self.selectedMember = selected
-        self.ContinueButton.disabled = False
-        await interaction.response.edit_message(
-            content=f"Selected member: **{selected.display_name}**. Continue to describe the report.",
-            view=self,
-        )
+        self.sourceInteraction = self.sourceInteraction or interaction
+        await interaction.response.edit_message(content=self._PromptText(), view=self)
 
-    @discord.ui.button(label="Enter User ID Instead", style=discord.ButtonStyle.secondary)
+    async def MemberCleared(self, interaction: discord.Interaction) -> None:
+        self.selectedMember = None
+        self.sourceInteraction = self.sourceInteraction or interaction
+        await interaction.response.edit_message(content=self._PromptText(), view=self)
+
+    async def on_timeout(self) -> None:
+        # The default timeout merely disables components; remove the ephemeral
+        # selection prompt instead so stale report forms do not remain in chat.
+        if self.sourceInteraction is None:
+            return
+        try:
+            await self.sourceInteraction.delete_original_response()
+        except discord.NotFound:
+            pass
+        except discord.HTTPException:
+            _logger.warning("Could not delete expired report selection prompt")
+
+    @discord.ui.button(
+        label="Enter User ID Instead",
+        emoji="🔎",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+        custom_id="bf:report_user_id",
+    )
     async def EnterUserIdButton(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
+        self.sourceInteraction = self.sourceInteraction or interaction
         await interaction.response.send_modal(
-            ReportScamUserIdModal(self.databaseManager)
+            ReportScamUserIdModal(
+                self.databaseManager,
+                reportType=self.reportType,
+                sourceInteraction=self.sourceInteraction,
+            )
         )
 
-    @discord.ui.button(label="Continue", style=discord.ButtonStyle.danger, disabled=True)
+    @discord.ui.button(
+        label="Continue",
+        emoji="➡️",
+        style=discord.ButtonStyle.primary,
+        row=2,
+        custom_id="bf:report_continue",
+    )
     async def ContinueButton(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        if self.selectedMember is None:
-            await SendEphemeralResponse(interaction, "Select a server member first.", ephemeral=True)
-            return
-        if self.selectedMember.id == interaction.user.id:
-            await SendEphemeralResponse(interaction, "You cannot report yourself.", ephemeral=True)
-            return
-        if self.selectedMember.bot:
-            await SendEphemeralResponse(interaction, "Bot accounts cannot be reported through this form.", ephemeral=True)
-            return
+        if self.selectedMember is not None:
+            if self.selectedMember.id == interaction.user.id:
+                await SendEphemeralResponse(interaction, "You cannot report yourself.", ephemeral=True)
+                return
+            if self.selectedMember.bot:
+                await SendEphemeralResponse(interaction, "Bot accounts cannot be reported through this form.", ephemeral=True)
+                return
+        self.sourceInteraction = self.sourceInteraction or interaction
         await interaction.response.send_modal(
-            ReportScamModal(self.databaseManager, self.selectedMember.id)
+            ReportScamModal(
+                self.databaseManager,
+                self.selectedMember.id if self.selectedMember is not None else None,
+                reportType=self.reportType,
+                sourceInteraction=self.sourceInteraction,
+            )
         )
 
 
-class ReportScamModal(discord.ui.Modal, title="Report a Scam"):
+class ReportScamModal(discord.ui.Modal, title="Submit a Report"):
     details = discord.ui.TextInput(
-        label="What happened? Include ticket # if known.",
-        placeholder="Describe the issue and what evidence moderators should review.",
+        label="Describe the issue (include evidence)",
+        placeholder="Explain what happened, steps to reproduce bugs, or include ticket # if known.",
         style=discord.TextStyle.paragraph, min_length=10, max_length=1500,
     )
 
-    def __init__(self, databaseManager: DatabaseManager, reportedUserId: int):
+    def __init__(
+        self,
+        databaseManager: DatabaseManager,
+        reportedUserId: int | None,
+        *,
+        reportType: str = "other",
+        sourceInteraction: discord.Interaction | None = None,
+    ):
         super().__init__(timeout=300)
         self.databaseManager = databaseManager
-        self.reportedUserId = int(reportedUserId)
+        self.reportedUserId = int(reportedUserId) if reportedUserId else None
+        self.reportType = reportType if reportType in REPORT_CATEGORY_LABELS else "other"
+        self.sourceInteraction = sourceInteraction
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or interaction.guild_id is None:
             await SendEphemeralResponse(interaction, "Reports can only be submitted inside a server.", ephemeral=True)
             return
         reportedId = self.reportedUserId
-        if reportedId == interaction.user.id:
+        if reportedId is not None and reportedId == interaction.user.id:
             await SendEphemeralResponse(interaction, "You cannot report yourself.", ephemeral=True)
             return
-        reportedMemberObj = interaction.guild.get_member(reportedId)
-        if reportedMemberObj is not None and reportedMemberObj.bot:
-            await SendEphemeralResponse(interaction, "Bot accounts cannot be reported through this form.", ephemeral=True)
-            return
+        if reportedId is not None:
+            reportedMemberObj = interaction.guild.get_member(reportedId)
+            if reportedMemberObj is not None and reportedMemberObj.bot:
+                await SendEphemeralResponse(interaction, "Bot accounts cannot be reported through this form.", ephemeral=True)
+                return
+
+        details = str(self.details.value).strip()
         db = self.databaseManager.ForServer(interaction.guild_id)
         try:
-            reportId = db.CreateScamReport(interaction.user.id, reportedId, str(self.details.value).strip())
+            # Zero is a legacy-compatible sentinel for "no specific member".
+            reportId = db.CreateScamReport(
+                interaction.user.id,
+                reportedId or 0,
+                details,
+                reportType=self.reportType,
+            )
         except ValueError as error:
             await SendEphemeralResponse(interaction, str(error), ephemeral=True)
             return
-        related = db.ListTicketHistoryForMember(reportedId, limit=5)
+
+        categoryLabel = REPORT_CATEGORY_LABELS.get(self.reportType, "Other / General Issue")
+        if self.sourceInteraction is not None:
+            try:
+                await self.sourceInteraction.delete_original_response()
+            except discord.NotFound:
+                pass
+            except discord.HTTPException:
+                _logger.warning("Report was saved, but its selection prompt could not be deleted")
+
         embed = discord.Embed(
-            title=f"🚨 Scam report #{reportId}",
-            description=str(self.details.value).strip()[:4000],
-            color=discord.Color.red(), timestamp=discord.utils.utcnow(),
+            title=f"📨 {categoryLabel} · Report #{reportId}",
+            description=details[:4000],
+            color=discord.Color.red() if self.reportType == "scam" else discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
         )
-        embed.add_field(name="Reported member", value=f"<@{reportedId}> (`{reportedId}`)", inline=False)
-        embed.add_field(name="Reported by", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
-        ticketLines = []
-        for row in related:
-            ticketLabel = TicketLabelFromRow(row)
-            status = str(row["status"])
-            transcriptChannelId = row["transcript_channel_id"] if "transcript_channel_id" in row.keys() else None
-            transcriptMessageId = row["transcript_message_id"] if "transcript_message_id" in row.keys() else None
-            if transcriptChannelId and transcriptMessageId:
-                link = f"[ticket #{ticketLabel} · {status} transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
-            elif str(status) == "open" and row["channel_id"]:
-                link = f"[ticket #{ticketLabel} · open ticket channel](https://discord.com/channels/{interaction.guild_id}/{int(row['channel_id'])})"
-            else:
-                link = f"ticket #{ticketLabel} · {status} · no transcript was saved"
-            ticketLines.append(link)
         embed.add_field(
-            name="Recent related ticket history",
-            value="\n".join(ticketLines) if ticketLines else "No matching ticket history found in the retained database records.",
+            name="Reported by",
+            value=f"{interaction.user.mention} (`{interaction.user.id}`)",
             inline=False,
         )
+        if reportedId is not None:
+            embed.add_field(
+                name="Member involved",
+                value=f"<@{reportedId}> (`{reportedId}`)",
+                inline=False,
+            )
+            related = db.ListTicketHistoryForMember(reportedId, limit=5)
+            ticketLines = []
+            for row in related:
+                ticketLabel = TicketLabelFromRow(row)
+                status = str(row["status"])
+                transcriptChannelId = row["transcript_channel_id"] if "transcript_channel_id" in row.keys() else None
+                transcriptMessageId = row["transcript_message_id"] if "transcript_message_id" in row.keys() else None
+                if transcriptChannelId and transcriptMessageId:
+                    link = f"[ticket #{ticketLabel} · {status} transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
+                elif str(status) == "open" and row["channel_id"]:
+                    link = f"[ticket #{ticketLabel} · open ticket channel](https://discord.com/channels/{interaction.guild_id}/{int(row['channel_id'])})"
+                else:
+                    link = f"ticket #{ticketLabel} · {status} · no transcript was saved"
+                ticketLines.append(link)
+            embed.add_field(
+                name="Recent related ticket history",
+                value="\n".join(ticketLines) if ticketLines else "No matching ticket history found in the retained database records.",
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Member involved", value="Not specified (general issue report)", inline=False)
+
         delivered = await SendAuditLog(interaction.guild, db, embed)
         if delivered:
-            await SendEphemeralResponse(interaction, f"✅ Report #{reportId} was saved and sent to the moderation log for review.", ephemeral=True)
+            await SendEphemeralResponse(
+                interaction,
+                f"✅ Report #{reportId} ({categoryLabel}) was saved and sent to the moderation log.",
+                ephemeral=True,
+            )
         else:
-            await SendEphemeralResponse(interaction, f"⚠️ Report #{reportId} was saved in the database, but the audit channel is not configured or could not be reached. Please ask an Administrator to set the Audit Log Channel in the Admin Dashboard.", ephemeral=True)
+            await SendEphemeralResponse(
+                interaction,
+                f"⚠️ Report #{reportId} ({categoryLabel}) was saved in the database, but the audit channel is not configured or could not be reached. Please ask an Administrator to set the Audit Log Channel in the Admin Dashboard.",
+                ephemeral=True,
+            )
 
 
 async def PublishTicketTranscript(
@@ -593,14 +771,16 @@ class MainPanelView(discord.ui.View):
 
 
     @discord.ui.button(
-        label="Report Scam", emoji="🚨", style=discord.ButtonStyle.danger,
+        label="Report Issue", emoji="📨", style=discord.ButtonStyle.danger,
         custom_id="bf:report_scam", row=1,
     )
     async def ReportScam(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         try:
+            view = ReportScamUserSelectView(self.databaseManager, interaction.user.id)
+            view.sourceInteraction = interaction
             await interaction.response.send_message(
-                "Select a server member and press **Continue**, or choose **Enter User ID Instead** if the member picker is unavailable.",
-                view=ReportScamUserSelectView(self.databaseManager, interaction.user.id),
+                "Choose what you want to report. Selecting a member is optional; leave it blank for bugs or general issues.",
+                view=view,
                 ephemeral=True,
             )
         except discord.NotFound as error:
