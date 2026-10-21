@@ -254,6 +254,10 @@ class ReportScamUserSelectView(discord.ui.View):
 
     async def CategorySelected(self, interaction: discord.Interaction, reportType: str) -> None:
         self.reportType = reportType if reportType in REPORT_CATEGORY_LABELS else "other"
+        for item in self.children:
+            if isinstance(item, ReportCategorySelect):
+                for option in item.options:
+                    option.default = option.value == self.reportType
         await interaction.response.edit_message(content=self._PromptText(), view=self)
         # Keep the most recent message-edit interaction token for timeout cleanup.
         self.sourceInteraction = interaction
@@ -791,12 +795,12 @@ class MainPanelView(discord.ui.View):
             raise
         except discord.HTTPException:
             _logger.exception("Discord rejected the report form: interaction=%s", interaction.id)
-            # A rejected modal has not consumed the initial response, so show a
-            # useful fallback instead of allowing the persistent View callback to crash.
+            # A rejected report-form response should show a useful fallback instead
+            # of allowing the persistent View callback to crash.
             try:
                 await SendEphemeralResponse(
                     interaction,
-                    "I couldn't open the scam-report form. Please try again; if this continues, notify a server Administrator.",
+                    "I couldn't open the report form. Please try again; if this continues, notify a server Administrator.",
                     ephemeral=True,
                 )
             except discord.HTTPException:
