@@ -185,6 +185,12 @@ class GuildDatabase:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS transaction_audit_deliveries (
+                transaction_id INTEGER PRIMARY KEY,
+                delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS settings (
                 setting_key TEXT PRIMARY KEY,
                 setting_value TEXT NOT NULL,
@@ -1039,6 +1045,27 @@ class GuildDatabase:
             except Exception:
                 self.connection.rollback()
                 raise
+
+    def GetUnauditedTicketTransactions(self, ticketId: int):
+        """Return positive credit movements for a ticket that have not yet reached the audit channel."""
+        return self.Execute(
+            """SELECT t.id, t.ticket_id, t.type, t.amount, t.from_user, t.to_user,
+                      t.actor_user_id, t.note, t.created_at
+               FROM transactions t
+               LEFT JOIN transaction_audit_deliveries a ON a.transaction_id = t.id
+               WHERE t.ticket_id = ? AND t.amount > 0 AND a.transaction_id IS NULL
+               ORDER BY t.id""",
+            (int(ticketId),), fetchAll=True,
+        )
+
+    def MarkTransactionAuditDelivered(self, transactionId: int) -> None:
+        """Mark a transaction only after its audit embed was successfully sent."""
+        with self.databaseLock:
+            self.connection.execute(
+                """INSERT INTO transaction_audit_deliveries(transaction_id)
+                   VALUES (?) ON CONFLICT(transaction_id) DO NOTHING""",
+                (int(transactionId),),
+            )
 
     def GetTicketById(self, ticketId: int):
         return self.Execute(
