@@ -806,29 +806,37 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             embed.description += "\nNo retained ticket records matched this member."
         await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
 
-    @bot.tree.command(name="scam-reports", description="Staff only: list unresolved scam reports and their supporting ticket history.")
+    @bot.tree.command(name="reports", description="Staff only: list unresolved reports across categories and related ticket history.")
     @app_commands.guild_only()
     @app_commands.describe(limit="Number of recent open reports to show (1–5; Discord embed limits)")
-    async def ScamReports(interaction: discord.Interaction, limit: app_commands.Range[int, 1, 5] = 5) -> None:
+    async def Reports(interaction: discord.Interaction, limit: app_commands.Range[int, 1, 5] = 5) -> None:
         if interaction.guild is None or interaction.guild_id is None:
             await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
             return
         if not HasConfiguredStaffAccess(interaction, databaseManager):
-            await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can review scam reports.", ephemeral=True)
+            await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can review reports.", ephemeral=True)
             return
         db = databaseManager.ForServer(interaction.guild_id)
         rows = db.ListScamReports(status="open", limit=int(limit))
-        embed = discord.Embed(title="🚨 Open scam reports", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+        embed = discord.Embed(title="📨 Open reports", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
         if not rows:
-            embed.description = "There are no open scam reports."
+            embed.description = "There are no open reports."
         else:
-            embed.description = "Use `/scam-review` to mark a report confirmed or dismissed after checking the linked transcript history in the Audit Log Channel."
+            embed.description = "Use `/report-review` to confirm or dismiss a report after reviewing the available evidence."
+            categoryLabels = {
+                "scam": "Scam / Fraud",
+                "bug": "Bug / Bot Issue",
+                "ticket_credit": "Ticket / Credit Issue",
+                "member_behavior": "Member Misconduct",
+                "other": "Other / General Issue",
+            }
             for row in rows[:10]:
-                reportedUserId = int(row["reported_user_id"])
-                relatedTickets = db.ListTicketHistoryForMember(reportedUserId, limit=2)
+                reportedUserId = int(row["reported_user_id"] or 0)
+                reportType = str(row["report_type"] if "report_type" in row.keys() else "scam")
+                categoryLabel = categoryLabels.get(reportType, "Other / General Issue")
+                relatedTickets = db.ListTicketHistoryForMember(reportedUserId, limit=2) if reportedUserId > 0 else []
                 relatedLinks = []
                 for ticketRow in relatedTickets:
-                    ticketNumber = int(ticketRow["ticket_number"] or 0)
                     ticketLabel = TicketLabelFromRow(ticketRow)
                     transcriptChannelId = ticketRow["transcript_channel_id"] if "transcript_channel_id" in ticketRow.keys() else None
                     transcriptMessageId = ticketRow["transcript_message_id"] if "transcript_message_id" in ticketRow.keys() else None
@@ -840,30 +848,38 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                         relatedLinks.append(
                             f"[ticket-{ticketLabel} open channel](https://discord.com/channels/{interaction.guild_id}/{int(ticketRow['channel_id'])})"
                         )
-                linksText = "\n".join(relatedLinks) if relatedLinks else "No transcript/open ticket links found for this member."
+                linksText = (
+                    "\n".join(relatedLinks) if relatedLinks
+                    else ("No member was attached to this report." if reportedUserId <= 0
+                          else "No transcript/open ticket links found for this member.")
+                )
+                memberText = f"<@{reportedUserId}> (`{reportedUserId}`)" if reportedUserId > 0 else "Not specified"
                 embed.add_field(
                     name=f"Report #{int(row['report_id'])} · {str(row['created_at'])}",
-                    value=(f"Reported: <@{reportedUserId}> (`{reportedUserId}`)\n"
-                           f"Reporter: <@{int(row['reporter_user_id'])}> (`{int(row['reporter_user_id'])}`)\n"
-                           f"Details: {str(row['details'])[:300]}\n"
-                           f"Related ticket history: {linksText}"),
+                    value=(
+                        f"**Category:** {categoryLabel}\n"
+                        f"**Reported member:** {memberText}\n"
+                        f"**Reporter:** <@{int(row['reporter_user_id'])}> (`{int(row['reporter_user_id'])}`)\n"
+                        f"**Details:** {str(row['details'])[:250]}\n"
+                        f"**Related history:** {linksText}"
+                    )[:1024],
                     inline=False,
                 )
         await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
 
-    @bot.tree.command(name="scam-review", description="Staff only: mark an open scam report confirmed or dismissed.")
+    @bot.tree.command(name="report-review", description="Staff only: confirm or dismiss an open report.")
     @app_commands.guild_only()
-    @app_commands.describe(report_id="The report number shown by /scam-reports", decision="Outcome after checking evidence", note="Optional moderation note")
+    @app_commands.describe(report_id="The report number shown by /reports", decision="Outcome after checking evidence", note="Optional moderation note")
     @app_commands.choices(decision=[
-        app_commands.Choice(name="Confirm scam", value="confirmed"),
+        app_commands.Choice(name="Confirm report", value="confirmed"),
         app_commands.Choice(name="Dismiss report", value="dismissed"),
     ])
-    async def ScamReview(interaction: discord.Interaction, report_id: app_commands.Range[int, 1, 2_147_483_647], decision: app_commands.Choice[str], note: str | None = None) -> None:
+    async def ReportReview(interaction: discord.Interaction, report_id: app_commands.Range[int, 1, 2_147_483_647], decision: app_commands.Choice[str], note: str | None = None) -> None:
         if interaction.guild is None or interaction.guild_id is None:
             await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
             return
         if not HasConfiguredStaffAccess(interaction, databaseManager):
-            await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can review scam reports.", ephemeral=True)
+            await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can review reports.", ephemeral=True)
             return
         db = databaseManager.ForServer(interaction.guild_id)
         try:
@@ -874,9 +890,9 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         if not changed:
             await SendEphemeralResponse(interaction, f"Report #{int(report_id)} was not found as an open report. It may already have been reviewed.", ephemeral=True)
             return
-        outcomeText = "confirmed as a scam" if decision.value == "confirmed" else "dismissed"
+        outcomeText = "confirmed" if decision.value == "confirmed" else "dismissed"
         await SendEphemeralResponse(interaction, f"✅ Report #{int(report_id)} marked **{outcomeText}**.", ephemeral=True)
-        embed = discord.Embed(title="🛡️ Scam report reviewed", color=discord.Color.orange() if decision.value == "dismissed" else discord.Color.red(), timestamp=discord.utils.utcnow())
+        embed = discord.Embed(title="🛡️ Report reviewed", color=discord.Color.orange() if decision.value == "dismissed" else discord.Color.blurple(), timestamp=discord.utils.utcnow())
         embed.add_field(name="Report", value=f"#{int(report_id)}", inline=True)
         embed.add_field(name="Decision", value=outcomeText, inline=True)
         embed.add_field(name="Reviewed by", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
