@@ -1852,17 +1852,20 @@ class GuildDatabase:
                 self.connection.rollback()
                 raise
 
-    def StartInviteEvent(self, rewardCredits: int, durationMinutes: int, startedBy: int) -> tuple[str, int | None, str | None]:
+    def StartInviteEvent(self, rewardCredits: int, durationMinutes: int | None, startedBy: int) -> tuple[str, int | None, str | None]:
         import datetime as _datetime
         reward = int(rewardCredits)
-        duration = int(durationMinutes)
+        infinite = durationMinutes is None
+        duration = 10_080 if infinite else int(durationMinutes)
         if reward < 0 or reward > 1_000_000_000:
             raise ValueError("Reward must be between 0 and 1,000,000,000 credits.")
-        if not 1 <= duration <= 10_080:
+        if not infinite and not 1 <= duration <= 10_080:
             raise ValueError("Duration must be between 1 minute and 7 days.")
         now = _datetime.datetime.now(_datetime.timezone.utc).replace(microsecond=0)
         startsAt = now.isoformat()
-        endsAt = (now + _datetime.timedelta(minutes=duration)).isoformat()
+        # Keep the existing non-null schema compatible across SQLite and PostgreSQL.
+        # Infinite events use a far-future end marker and are still manually endable.
+        endsAt = "9999-12-31T23:59:59+00:00" if infinite else (now + _datetime.timedelta(minutes=duration)).isoformat()
         with self.databaseLock:
             self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
@@ -1890,7 +1893,7 @@ class GuildDatabase:
                         (settingKey, settingValue),
                     )
                 self.connection.commit()
-                return "started", eventId, endsAt
+                return "started", eventId, None if infinite else endsAt
             except Exception:
                 self.connection.rollback()
                 raise
