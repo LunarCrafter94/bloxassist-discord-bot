@@ -1,8 +1,8 @@
-# Bot branding assets
+# BloxAssist branding assets
 
-Place the actual image files here before publishing:
+The current repository branding files are:
 
-- `bot-client_icon.png` — bot icon displayed in the README.
-- `bot-client_banner.png` — banner displayed near the top of the README.
+- `bot-client_icon.png` — BloxAssist icon displayed in the root README.
+- `bot-client_banner.png` — BloxAssist banner displayed near the top of the root README.
 
-These images were not supplied with the current source files, so they are intentionally not fabricated. The README references their final paths.
+These files are the current BloxAssist-branded artwork. The PolyForm Noncommercial license in the repository root applies to the BloxAssist source code only; it does not grant permission to reuse the BloxAssist name, logo, icon, banner, or other branding assets. Those assets remain reserved by their respective rights holder(s), unless separate permission is granted.
