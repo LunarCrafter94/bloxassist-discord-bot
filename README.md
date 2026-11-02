@@ -8,6 +8,10 @@ A slash-command Discord bot for multi-server ticket support and credit balances.
 
 > **Current source status:** The published v0.9.0 pre-release tag is unchanged; `main` also contains unreleased follow-up fixes for ticket-helper selection, general issue reporting, and the inviter-penalty modal. See [`docs/release_history.md`](docs/release_history.md) for the difference. The v0.9.0 feature inventory is in [`docs/changelog-0.9.0.md`](docs/changelog-0.9.0.md). Live Discord acceptance testing is still required for debt, penalties, report delivery, audit logging, and PostgreSQL/backup deployment.
 
+## AI-assisted development disclosure
+
+BloxAssist is a heavily AI-assisted project and can fairly be described as “vibe-coded.” AI tools have been used extensively to help develop, revise, debug, and document parts of the project. The maintainer directs the project and is responsible for its maintenance, but AI-generated suggestions can still contain mistakes, bugs, or security issues. Review and test the code in a safe development environment before deploying it, especially when handling real users, credits, or server data.
+
 ## Features
 
 - Public Help Center panel with ticket creation, balances, and a **Report Issue** form for scams, bugs, ticket/credit issues, member misconduct, and general concerns. A reported member is optional.
