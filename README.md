@@ -74,3 +74,17 @@ The bot needs to be able to DM the selected user. The ZIP is encrypted with WinZ
 - Invite tracking needs `Manage Server` to inspect invite uses. If the invite-use change cannot be uniquely attributed, no reward is issued.
 - Do not commit `private-configs/credentials.env`, real tokens, database files, backups, logs, or real member/credit data. `.gitignore` excludes these by design.
 - The Admin Dashboard can edit the ordinary plain-text welcome message sent to new ticket channels. It is not pinned and is not an embed. Supported placeholders: `{requester}`, `{helpers}`, `{ticket}`, and `{event}`. Existing ticket conversations are not rewritten.
+
+## License
+
+BloxAssist source code is licensed under the
+[PolyForm Noncommercial License 1.0.0](LICENSE).
+
+You may use, study, modify, and distribute this software
+for noncommercial purposes under the terms of the license.
+
+Commercial use requires separate permission from the
+copyright holder.
+
+BloxAssist branding, name, and logos are not included
+in the software license and remain reserved.
