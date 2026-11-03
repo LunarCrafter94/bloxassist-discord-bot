@@ -747,6 +747,19 @@ class GuildDatabase:
                 if self.backend == "postgresql":
                     userLockSql += " FOR UPDATE"
                 userRow = self.connection.execute(userLockSql, (targetId,)).fetchone()
+                if key:
+                    prior = self.connection.execute(
+                        "SELECT * FROM transactions WHERE idempotency_key = ?", (key,)
+                    ).fetchone()
+                    if prior is not None:
+                        same = str(prior["type"]) == "penalty_debt" and int(prior["amount"]) == penalty and prior["to_user"] == targetId and prior["actor_user_id"] == actorId
+                        debtRow = self.connection.execute(
+                            "SELECT amount FROM credit_debts WHERE user_id = ?", (targetId,)
+                        ).fetchone()
+                        debt = int(debtRow["amount"]) if debtRow else 0
+                        balance = int(userRow["credits"])
+                        self.connection.rollback()
+                        return ("duplicate" if same else "idempotency_conflict"), balance, debt
                 credits = int(userRow["credits"])
                 debtRow = self.connection.execute("SELECT amount FROM credit_debts WHERE user_id = ?", (targetId,)).fetchone()
                 oldDebt = int(debtRow["amount"]) if debtRow else 0
