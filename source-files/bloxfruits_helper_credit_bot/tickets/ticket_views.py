@@ -1805,7 +1805,7 @@ async def ConfirmTicketResolutionCurrent(interaction: discord.Interaction, datab
                 f"✅ All required participants approved completion. Gross rewards: {summary or 'none'}.{debtOffsetText}{refundText}",
                 interaction.user.id,
             )
-            await EditEphemeralOriginalResponse(interaction, content=f"✅ Completion confirmed by all participants ({required}/{required}); credits paid.{refundText}")
+            await EditEphemeralOriginalResponse(interaction, content=f"✅ Completion confirmed by all participants ({required}/{required}); gross rewards: {summary or 'none'}.{debtOffsetText}{refundText}")
         else:
             status, amount = db.RefundTicket(int(ticket["ticket_id"]), actorUserId=interaction.user.id, note="requester and all active helpers approved cancellation")
             if status != "refunded" or amount is None:
