@@ -115,8 +115,8 @@ class CreditPrivacyTests(unittest.TestCase):
             creditsBody,
         )
         self.assertIn(
-            'if CanViewMemberCreditDebt(interaction, member.id, databaseManager):\\n'
-            '            debt = db.GetCreditDebt(member.id)\\n'
+            'if CanViewMemberCreditDebt(interaction, member.id, databaseManager):\n'
+            '            debt = db.GetCreditDebt(member.id)\n'
             '            embed.add_field(name="Outstanding debt"',
             creditsBody,
         )
