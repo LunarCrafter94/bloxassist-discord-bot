@@ -114,11 +114,11 @@ class CreditPrivacyTests(unittest.TestCase):
             'embed.add_field(name="Available credits", value=f"**{amount:,}**", inline=True)',
             creditsBody,
         )
-        self.assertRegex(
+        self.assertIn(
+            'if CanViewMemberCreditDebt(interaction, member.id, databaseManager):\\n'
+            '            debt = db.GetCreditDebt(member.id)\\n'
+            '            embed.add_field(name="Outstanding debt"',
             creditsBody,
-            r"if CanViewMemberCreditDebt\(interaction, member\.id, databaseManager\):\\n"
-            r"\s+debt = db\.GetCreditDebt\(member\.id\)\\n"
-            r"\s+embed\.add_field\(name=\"Outstanding debt\"",
         )
         self.assertIn(
             "await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)",
