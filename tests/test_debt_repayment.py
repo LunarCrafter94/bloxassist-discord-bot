@@ -99,6 +99,40 @@ class DebtRepaymentTests(unittest.TestCase):
         self.assertEqual(self.db.RepayCreditDebt(self.userId, 50), ("no_debt", 200, 0))
         self.assertEqual(self.db.GetBalance(self.userId), 200)
 
+    def testFutureTicketRewardAutomaticallyPaysDownDebtFirst(self):
+        requesterId = 444444444444444444
+        helperId = 555555555555555555
+        self.db.CreateUser(requesterId, credits=200)
+        self.db.CreateUser(helperId, credits=0)
+        ticketId = self.db.ReserveTicket(
+            channelId=777777777777777777,
+            creatorId=requesterId,
+            eventKey="debt_reward_test",
+            helperIds=[helperId],
+            requiredCredits=100,
+        )
+        self.assertIsNotNone(ticketId)
+        self.assertEqual(
+            self.db.ApplyPenaltyDebt(
+                helperId, 150, actorUserId=9001, reason="debt before payout",
+                idempotencyKey="debt-before-payout",
+            ),
+            ("penalized", 0, 150),
+        )
+
+        status, payouts = self.db.CompleteTicket(ticketId, actorUserId=9001, note="test payout")
+        self.assertEqual(status, "completed")
+        self.assertEqual(payouts, [(helperId, 100)])
+        self.assertEqual(self.db.GetBalance(helperId), 0)
+        self.assertEqual(self.db.GetCreditDebt(helperId), 50)
+        offset = self.db.Execute(
+            "SELECT * FROM transactions WHERE ticket_id = ? AND type = 'debt_repayment'",
+            (ticketId,), fetchOne=True,
+        )
+        self.assertIsNotNone(offset)
+        self.assertEqual(int(offset["amount"]), 100)
+        self.assertIn("Automatic debt offset", str(offset["note"]))
+
     def testCreditHistoryIncludesRepaymentsAndSupportsPagination(self):
         self.addCredits()
         self.db.RepayCreditDebt(self.userId, 50, idempotencyKey="history-repayment-1")
