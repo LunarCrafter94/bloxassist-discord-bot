@@ -6,6 +6,10 @@
 
 A slash-command Discord bot for multi-server ticket support and credit balances. Each Discord server has isolated data, ticket numbering, services, settings, audit records, and invite-reward event history.
 
+
+
+> **🧪 Beta status and deployment scope (as of November 3, 2026):** BloxAssist is still in beta. It has only been deployed in **one small real Discord server** and **one separate testing server**. This is a very limited deployment, not broad production testing across multiple communities or at scale. Automated tests have passed, but they do not replace extensive live testing with different users, permissions, and server configurations. Bugs and edge cases may remain. Test new or changed workflows in a separate server first, keep independent backups, and verify important credit and ticket records rather than relying on the bot as the sole source of truth.
+
 > **Current source status:** The published v0.9.0 pre-release tag is unchanged; `main` also contains unreleased follow-up fixes for ticket-helper selection, general issue reporting, and the inviter-penalty modal. See [`docs/release_history.md`](docs/release_history.md) for the difference. The v0.9.0 feature inventory is in [`docs/changelog-0.9.0.md`](docs/changelog-0.9.0.md). Live Discord acceptance testing is still required for debt, penalties, report delivery, audit logging, and PostgreSQL/backup deployment.
 
 ## AI-assisted development disclosure
