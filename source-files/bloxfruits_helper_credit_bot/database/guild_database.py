@@ -688,6 +688,10 @@ class GuildDatabase:
         if normalizedAmount < 0:
             raise ValueError("Reward amount cannot be negative.")
         self._EnsureUserWithinTransaction(normalizedUserId, self.GetDefaultJoinCredits())
+        userLockSql = "SELECT credits FROM users WHERE user_id = ?"
+        if self.backend == "postgresql":
+            userLockSql += " FOR UPDATE"
+        self.connection.execute(userLockSql, (normalizedUserId,)).fetchone()
         debtRow = self.connection.execute(
             "SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedUserId,)
         ).fetchone()
@@ -739,7 +743,10 @@ class GuildDatabase:
                         self.connection.rollback()
                         return ("duplicate" if same else "idempotency_conflict"), balance, debt
                 self._EnsureUserWithinTransaction(targetId, self.GetDefaultJoinCredits())
-                userRow = self.connection.execute("SELECT credits FROM users WHERE user_id = ?", (targetId,)).fetchone()
+                userLockSql = "SELECT credits FROM users WHERE user_id = ?"
+                if self.backend == "postgresql":
+                    userLockSql += " FOR UPDATE"
+                userRow = self.connection.execute(userLockSql, (targetId,)).fetchone()
                 credits = int(userRow["credits"])
                 debtRow = self.connection.execute("SELECT amount FROM credit_debts WHERE user_id = ?", (targetId,)).fetchone()
                 oldDebt = int(debtRow["amount"]) if debtRow else 0
@@ -793,6 +800,11 @@ class GuildDatabase:
         with self.databaseLock:
             self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
             try:
+                self._EnsureUserWithinTransaction(normalizedUserId, self.GetDefaultJoinCredits())
+                balanceSql = "SELECT credits FROM users WHERE user_id = ?"
+                if self.backend == "postgresql":
+                    balanceSql += " FOR UPDATE"
+                balanceRow = self.connection.execute(balanceSql, (normalizedUserId,)).fetchone()
                 if normalizedKey is not None:
                     existing = self.connection.execute(
                         "SELECT * FROM transactions WHERE idempotency_key = ?",
@@ -806,9 +818,6 @@ class GuildDatabase:
                             and existing["to_user"] is None
                             and existing["actor_user_id"] == normalizedUserId
                         )
-                        balanceRow = self.connection.execute(
-                            "SELECT credits FROM users WHERE user_id = ?", (normalizedUserId,)
-                        ).fetchone()
                         debtRow = self.connection.execute(
                             "SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedUserId,)
                         ).fetchone()
@@ -816,12 +825,6 @@ class GuildDatabase:
                         debt = int(debtRow["amount"]) if debtRow else 0
                         self.connection.rollback()
                         return ("duplicate" if sameOperation else "idempotency_conflict"), balance, debt
-
-                self._EnsureUserWithinTransaction(normalizedUserId, self.GetDefaultJoinCredits())
-                balanceSql = "SELECT credits FROM users WHERE user_id = ?"
-                if self.backend == "postgresql":
-                    balanceSql += " FOR UPDATE"
-                balanceRow = self.connection.execute(balanceSql, (normalizedUserId,)).fetchone()
                 debtRow = self.connection.execute(
                     "SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedUserId,)
                 ).fetchone()
