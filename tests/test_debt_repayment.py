@@ -109,7 +109,7 @@ class DebtRepaymentTests(unittest.TestCase):
         self.assertEqual(len(secondPage), 1)
         self.assertEqual(firstPage[0]["type"], "debt_repayment")
         self.assertEqual(firstPage[1]["type"], "debt_repayment")
-        self.assertEqual(secondPage[0]["type"], "system_add")
+        self.assertEqual(secondPage[0]["type"], "admin_add")
 
     def testInvalidAmountsAreRejected(self):
         for amount in (0, -1, True, 1_000_000_001):
