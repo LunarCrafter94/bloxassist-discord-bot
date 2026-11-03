@@ -10,7 +10,8 @@
 - Records each repayment as a distinct `debt_repayment` transaction in the existing ledger.
 - Uses Discord interaction IDs as idempotency keys so retrying the same interaction cannot deduct credits twice.
 - Serializes PostgreSQL repayment operations by locking the member's balance row.
-- Updated `/balance` and `/credits` to show available credits and outstanding debt. The personal balance view also shows the net position.
+- Updated `/balance` to show available credits, outstanding debt, and net position.
+- Updated `/credits` to show available credits to all members, while limiting another member's debt details to that member, the server owner, Administrators, and configured dashboard moderators.
 
 ## Credit history
 
@@ -33,6 +34,7 @@
 
 - `tests/test_debt_repayment.py`: partial/full repayment, invalid amounts, no debt, insufficient credits, overpayment, idempotency conflicts, ledger entries, credit-history pagination, and automatic ticket-reward debt offsets.
 - `tests/test_report_pagination.py`: non-overlapping pages, category filtering, and all-category pagination.
+- `tests/test_credit_privacy.py`: self, owner, Administrator, configured moderator, ordinary member, Manage Server-only, and non-guild debt-visibility boundaries; verifies `/credits` only queries and displays debt after authorization.
 
 ## Verification still required
 
