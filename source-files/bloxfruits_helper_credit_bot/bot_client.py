@@ -377,10 +377,16 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 "This command must be used inside a server.", ephemeral=True
             )
             return
+        db = databaseManager.ForServer(interaction.guild_id)
         amount = creditService.GetBalance(interaction.guild_id, interaction.user.id)
-        await SendEphemeralResponse(interaction, 
-            f"💰 You have **{amount:,} credits** in this server.", ephemeral=True
-        )
+        debt = db.GetCreditDebt(interaction.user.id)
+        embed = discord.Embed(title="💰 Your credit account", color=discord.Color.blurple())
+        embed.add_field(name="Available credits", value=f"**{amount:,}**", inline=True)
+        embed.add_field(name="Outstanding debt", value=f"**{debt:,}**", inline=True)
+        embed.add_field(name="Total obligations", value=f"**{amount + debt:,}**", inline=True)
+        if debt:
+            embed.set_footer(text="Use /repay-debt to pay down your outstanding debt.")
+        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
 
     @bot.tree.command(name="credits", description="Check another member's credits in this server.")
     @app_commands.describe(member="The member whose credits you want to check")
@@ -391,10 +397,134 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 "This command must be used inside a server.", ephemeral=True
             )
             return
+        db = databaseManager.ForServer(interaction.guild_id)
         amount = creditService.GetBalance(interaction.guild_id, member.id)
-        await SendEphemeralResponse(interaction, 
-            f"💰 {member.mention} has **{amount:,} credits** in this server.", ephemeral=True
-        )
+        debt = db.GetCreditDebt(member.id)
+        embed = discord.Embed(title="💰 Member credit account", color=discord.Color.blurple())
+        embed.add_field(name="Member", value=member.mention, inline=False)
+        embed.add_field(name="Available credits", value=f"**{amount:,}**", inline=True)
+        embed.add_field(name="Outstanding debt", value=f"**{debt:,}**", inline=True)
+        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="repay-debt", description="Use your available credits to repay outstanding debt.")
+    @app_commands.guild_only()
+    @app_commands.describe(amount="Number of credits to apply to your outstanding debt")
+    async def RepayDebt(interaction: discord.Interaction, amount: app_commands.Range[int, 1, 1_000_000_000]) -> None:
+        if interaction.guild_id is None or interaction.guild is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        db = databaseManager.ForServer(interaction.guild_id)
+        await DeferEphemeralResponse(interaction, thinking=True)
+        try:
+            status, balance, debt = db.RepayCreditDebt(
+                interaction.user.id, int(amount),
+                idempotencyKey=f"slash-debt-repayment:{interaction.id}",
+            )
+        except Exception:
+            logger.exception("Debt repayment failed: guild=%s user=%s", interaction.guild_id, interaction.user.id)
+            await EditEphemeralOriginalResponse(interaction, content="The repayment failed. No success was recorded; check your credit history before retrying.")
+            return
+        if status == "insufficient_credits":
+            await EditEphemeralOriginalResponse(interaction, content=f"You have **{int(balance or 0):,} available credits**, which is not enough for that repayment. Your debt remains **{debt:,} credits**.")
+            return
+        if status == "exceeds_debt":
+            await EditEphemeralOriginalResponse(interaction, content=f"Your outstanding debt is only **{debt:,} credits**. Enter an amount no greater than your debt.")
+            return
+        if status == "no_debt":
+            await EditEphemeralOriginalResponse(interaction, content="You do not have any outstanding credit debt.")
+            return
+        if status == "duplicate":
+            await EditEphemeralOriginalResponse(interaction, content=f"This repayment was already processed. Available credits: **{int(balance or 0):,}** · Remaining debt: **{debt:,}**.")
+            return
+        if status != "repaid":
+            await EditEphemeralOriginalResponse(interaction, content=f"Repayment was not applied (status: {status}).")
+            return
+        await EditEphemeralOriginalResponse(interaction, content=f"✅ Repaid **{int(amount):,} credits**.\nAvailable credits: **{int(balance or 0):,}**\nRemaining debt: **{debt:,}**.")
+        embed = discord.Embed(title="💳 Credit debt repayment", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Member", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        embed.add_field(name="Repaid", value=f"{int(amount):,} credits", inline=True)
+        embed.add_field(name="Remaining debt", value=f"{debt:,} credits", inline=True)
+        embed.add_field(name="Available balance", value=f"{int(balance or 0):,} credits", inline=True)
+        await SendAuditLog(interaction.guild, db, embed)
+        logger.info("Member debt repayment: guild=%s user=%s amount=%s remaining_debt=%s", interaction.guild_id, interaction.user.id, int(amount), debt)
+
+    @bot.tree.command(name="credit-history", description="View recent credit transactions for yourself or a member (staff).")
+    @app_commands.guild_only()
+    @app_commands.describe(member="Optional member (staff access required to view another member)", page="History page, 10 transactions per page")
+    async def CreditHistory(
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+        page: app_commands.Range[int, 1, 1000] = 1,
+    ) -> None:
+        if interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        target = member or interaction.user
+        if target.id != interaction.user.id and not HasConfiguredStaffAccess(interaction, databaseManager):
+            await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can view another member's credit history.", ephemeral=True)
+            return
+        db = databaseManager.ForServer(interaction.guild_id)
+        rows = db.ListCreditTransactions(target.id, limit=10, offset=(int(page) - 1) * 10)
+        embed = discord.Embed(title=f"📜 Credit history · {target}", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        embed.description = f"Showing page {int(page)} · 10 transactions per page. Newest first."
+        if not rows:
+            embed.description += "\\nNo credit transactions were found on this page."
+        else:
+            for row in rows:
+                transactionType = str(row["type"]).replace("_", " ").title()
+                amountText = f"{int(row['amount']):,} credits"
+                if row["type"] == "debt_repayment":
+                    amountText = f"−{amountText} (debt repayment)"
+                elif row["to_user"] == target.id:
+                    amountText = f"+{amountText}"
+                elif row["from_user"] == target.id:
+                    amountText = f"−{amountText}"
+                note = str(row["note"] or "No note")[:180]
+                embed.add_field(
+                    name=f"#{int(row['id'])} · {transactionType} · {amountText}",
+                    value=f"{row['created_at']}\\n{note}",
+                    inline=False,
+                )
+        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="diagnostics", description="Server owner only: check bot and credit database configuration.")
+    @app_commands.guild_only()
+    async def Diagnostics(interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        if not IsServerOwner(interaction):
+            await SendEphemeralResponse(interaction, "Only this server's owner can run /diagnostics.", ephemeral=True)
+            return
+        db = databaseManager.ForServer(interaction.guild_id)
+        await DeferEphemeralResponse(interaction, thinking=True)
+        checks: list[tuple[str, bool, str]] = []
+        try:
+            db.Execute("SELECT 1", fetchOne=True)
+            checks.append(("Database connection", True, f"{db.backend.upper()} reachable"))
+        except Exception:
+            logger.exception("Database diagnostics failed: guild=%s", interaction.guild_id)
+            checks.append(("Database connection", False, "Connection/query failed; inspect host logs"))
+        try:
+            for table in ("users", "transactions", "credit_debts", "tickets", "scam_reports"):
+                db.Execute(f"SELECT 1 FROM {table} LIMIT 1", fetchOne=True)
+            checks.append(("Core tables", True, "Required tables are queryable"))
+        except Exception:
+            logger.exception("Core table diagnostics failed: guild=%s", interaction.guild_id)
+            checks.append(("Core tables", False, "One or more required tables could not be queried"))
+        auditId = db.GetSetting("audit_log_channel_id", "") or ""
+        auditChannel = interaction.guild.get_channel(int(auditId)) if str(auditId).isdigit() else None
+        if isinstance(auditChannel, discord.TextChannel):
+            permissions = auditChannel.permissions_for(interaction.guild.me) if interaction.guild.me else None
+            canAudit = bool(permissions and permissions.view_channel and permissions.send_messages and permissions.embed_links)
+            checks.append(("Audit log channel", canAudit, auditChannel.mention if canAudit else "Configured channel lacks required bot permissions"))
+        else:
+            checks.append(("Audit log channel", False, "Not configured or channel unavailable"))
+        embed = discord.Embed(title="🔎 BloxAssist diagnostics", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        for label, passed, detail in checks:
+            embed.add_field(name=f"{'✅' if passed else '⚠️'} {label}", value=detail, inline=False)
+        embed.set_footer(text="Diagnostics never displays database credentials or secret values.")
+        await EditEphemeralOriginalResponse(interaction, embed=embed)
 
     setupGroup = app_commands.Group(
         name="setup",
