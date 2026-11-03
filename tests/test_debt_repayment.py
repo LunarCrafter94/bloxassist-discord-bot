@@ -139,11 +139,15 @@ class DebtRepaymentTests(unittest.TestCase):
         self.db.RepayCreditDebt(self.userId, 25, idempotencyKey="history-repayment-2")
         firstPage = self.db.ListCreditTransactions(self.userId, limit=2, offset=0)
         secondPage = self.db.ListCreditTransactions(self.userId, limit=2, offset=2)
+        thirdPage = self.db.ListCreditTransactions(self.userId, limit=2, offset=4)
         self.assertEqual(len(firstPage), 2)
-        self.assertEqual(len(secondPage), 1)
+        self.assertEqual(len(secondPage), 2)
+        self.assertEqual(len(thirdPage), 1)
         self.assertEqual(firstPage[0]["type"], "debt_repayment")
         self.assertEqual(firstPage[1]["type"], "debt_repayment")
         self.assertEqual(secondPage[0]["type"], "admin_add")
+        self.assertEqual(secondPage[1]["type"], "penalty_debt")
+        self.assertEqual(thirdPage[0]["type"], "starting_balance")
 
     def testInvalidAmountsAreRejected(self):
         for amount in (0, -1, True, 1_000_000_001):
