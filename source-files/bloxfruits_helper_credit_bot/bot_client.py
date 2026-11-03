@@ -61,6 +61,19 @@ def HasConfiguredStaffAccess(interaction: discord.Interaction, databaseManager: 
     return bool(allowedRoleIds.intersection(userRoleIds))
 
 
+def CanViewMemberCreditDebt(
+    interaction: discord.Interaction,
+    targetUserId: int,
+    databaseManager: DatabaseManager,
+) -> bool:
+    """Allow members to see their own debt and configured staff to see another member's debt."""
+    if interaction.guild is None or interaction.guild_id is None:
+        return False
+    if int(interaction.user.id) == int(targetUserId):
+        return True
+    return HasConfiguredStaffAccess(interaction, databaseManager)
+
+
 def CreateBot(settings: RuntimeSettings) -> discord.Client:
     """Create a bot instance wired to a guild-aware database manager."""
     intents = discord.Intents.default()
@@ -409,11 +422,12 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             return
         db = databaseManager.ForServer(interaction.guild_id)
         amount = creditService.GetBalance(interaction.guild_id, member.id)
-        debt = db.GetCreditDebt(member.id)
         embed = discord.Embed(title="💰 Member credit account", color=discord.Color.blurple())
         embed.add_field(name="Member", value=member.mention, inline=False)
         embed.add_field(name="Available credits", value=f"**{amount:,}**", inline=True)
-        embed.add_field(name="Outstanding debt", value=f"**{debt:,}**", inline=True)
+        if CanViewMemberCreditDebt(interaction, member.id, databaseManager):
+            debt = db.GetCreditDebt(member.id)
+            embed.add_field(name="Outstanding debt", value=f"**{debt:,}**", inline=True)
         await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
 
     @bot.tree.command(name="repay-debt", description="Use your available credits to repay outstanding debt.")
