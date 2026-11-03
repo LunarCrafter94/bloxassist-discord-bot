@@ -468,7 +468,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         embed = discord.Embed(title=f"📜 Credit history · {target}", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
         embed.description = f"Showing page {int(page)} · 10 transactions per page. Newest first."
         if not rows:
-            embed.description += "\\nNo credit transactions were found on this page."
+            embed.description += "\nNo credit transactions were found on this page."
         else:
             for row in rows:
                 transactionType = str(row["type"]).replace("_", " ").title()
@@ -482,7 +482,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 note = str(row["note"] or "No note")[:180]
                 embed.add_field(
                     name=f"#{int(row['id'])} · {transactionType} · {amountText}",
-                    value=f"{row['created_at']}\\n{note}",
+                    value=f"{row['created_at']}\n{note}",
                     inline=False,
                 )
         await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
@@ -936,10 +936,22 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             embed.description += "\nNo retained ticket records matched this member."
         await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
 
-    @bot.tree.command(name="reports", description="Staff only: list unresolved reports across categories and related ticket history.")
+    @bot.tree.command(name="reports", description="Staff only: browse open reports by category and page.")
     @app_commands.guild_only()
-    @app_commands.describe(limit="Number of recent open reports to show (1–5; Discord embed limits)")
-    async def Reports(interaction: discord.Interaction, limit: app_commands.Range[int, 1, 5] = 5) -> None:
+    @app_commands.describe(page="Page number (5 reports per page)", category="Optional report category filter")
+    @app_commands.choices(category=[
+        app_commands.Choice(name="All categories", value="all"),
+        app_commands.Choice(name="Scam / Fraud", value="scam"),
+        app_commands.Choice(name="Bug / Bot Issue", value="bug"),
+        app_commands.Choice(name="Ticket / Credit Issue", value="ticket_credit"),
+        app_commands.Choice(name="Member Misconduct", value="member_behavior"),
+        app_commands.Choice(name="Other / General Issue", value="other"),
+    ])
+    async def Reports(
+        interaction: discord.Interaction,
+        page: app_commands.Range[int, 1, 1000] = 1,
+        category: app_commands.Choice[str] | None = None,
+    ) -> None:
         if interaction.guild is None or interaction.guild_id is None:
             await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
             return
@@ -947,8 +959,10 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can review reports.", ephemeral=True)
             return
         db = databaseManager.ForServer(interaction.guild_id)
-        rows = db.ListScamReports(status="open", limit=int(limit))
-        embed = discord.Embed(title="📨 Open reports", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        rows = db.ListScamReports(status="open", limit=5, reportType=category.value if category else None, offset=(int(page) - 1) * 5)
+        categoryText = category.name if category else "All categories"
+        embed = discord.Embed(title=f"📨 Open reports · {categoryText}", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        embed.set_footer(text=f"Page {int(page)} · 5 reports per page · Use /reports page:<number> to navigate")
         if not rows:
             embed.description = "There are no open reports."
         else:
