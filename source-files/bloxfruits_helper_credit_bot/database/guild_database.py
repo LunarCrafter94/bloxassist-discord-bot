@@ -774,9 +774,10 @@ class GuildDatabase:
                         return ("duplicate" if sameOperation else "idempotency_conflict"), balance, debt
 
                 self._EnsureUserWithinTransaction(normalizedUserId, self.GetDefaultJoinCredits())
-                balanceRow = self.connection.execute(
-                    "SELECT credits FROM users WHERE user_id = ?", (normalizedUserId,)
-                ).fetchone()
+                balanceSql = "SELECT credits FROM users WHERE user_id = ?"
+                if self.backend == "postgresql":
+                    balanceSql += " FOR UPDATE"
+                balanceRow = self.connection.execute(balanceSql, (normalizedUserId,)).fetchone()
                 debtRow = self.connection.execute(
                     "SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedUserId,)
                 ).fetchone()
