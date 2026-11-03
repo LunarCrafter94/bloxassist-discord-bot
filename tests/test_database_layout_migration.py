@@ -1,6 +1,7 @@
 """Tests for the named per-server database layout and safe legacy migration."""
 
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,23 +68,27 @@ class DatabaseLayoutMigrationTests(unittest.TestCase):
             self.dataRoot / "servers" / str(self.serverId) / "blox_fruits_credit_system.sqlite3"
         )
         databasePath.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(databasePath) as connection:
-            connection.execute(
-                """CREATE TABLE scam_reports (
-                    report_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    reporter_user_id INTEGER NOT NULL,
-                    reported_user_id INTEGER NOT NULL,
-                    details TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'open',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    reviewed_by INTEGER,
-                    review_note TEXT
-                )"""
-            )
-            connection.execute(
-                "INSERT INTO scam_reports(reporter_user_id, reported_user_id, details) VALUES (?, ?, ?)",
-                (555010, 555011, "Legacy scam report"),
-            )
+        # sqlite3.Connection's context manager commits/rolls back but does not
+        # close the connection. Close it explicitly so Windows can remove the
+        # temporary database directory during tearDown.
+        with closing(sqlite3.connect(databasePath)) as connection:
+            with connection:
+                connection.execute(
+                    """CREATE TABLE scam_reports (
+                        report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        reporter_user_id INTEGER NOT NULL,
+                        reported_user_id INTEGER NOT NULL,
+                        details TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'open',
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        reviewed_by INTEGER,
+                        review_note TEXT
+                    )"""
+                )
+                connection.execute(
+                    "INSERT INTO scam_reports(reporter_user_id, reported_user_id, details) VALUES (?, ?, ?)",
+                    (555010, 555011, "Legacy scam report"),
+                )
 
         database = GuildDatabase(databasePath, self.serverId, 100, DEFAULT_SERVICES)
         try:
