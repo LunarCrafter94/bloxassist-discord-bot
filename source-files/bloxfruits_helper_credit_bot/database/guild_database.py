@@ -703,6 +703,112 @@ class GuildDatabase:
                 self.connection.rollback()
                 raise
 
+    def RepayCreditDebt(
+        self,
+        userId: int,
+        amount: int,
+        *,
+        idempotencyKey: str | None = None,
+    ) -> tuple[str, int | None, int]:
+        """Use a member's available credits to repay outstanding debt atomically.
+
+        The repayment is recorded as its own immutable transaction row. A
+        repeated interaction ID cannot deduct credits or reduce debt twice.
+        Returns (status, current_balance, remaining_debt).
+        """
+        if isinstance(amount, bool):
+            raise ValueError("Repayment amount must be a positive integer.")
+        try:
+            normalizedAmount = int(amount)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Repayment amount must be a positive integer.") from error
+        if normalizedAmount <= 0 or normalizedAmount > 1_000_000_000:
+            raise ValueError("Repayment amount must be between 1 and 1,000,000,000 credits.")
+
+        normalizedUserId = int(userId)
+        normalizedKey = str(idempotencyKey).strip() if idempotencyKey is not None else None
+        if normalizedKey == "":
+            normalizedKey = None
+        if normalizedKey is not None and len(normalizedKey) > 200:
+            raise ValueError("idempotencyKey must be 200 characters or fewer.")
+
+        with self.databaseLock:
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
+            try:
+                if normalizedKey is not None:
+                    existing = self.connection.execute(
+                        "SELECT * FROM transactions WHERE idempotency_key = ?",
+                        (normalizedKey,),
+                    ).fetchone()
+                    if existing is not None:
+                        sameOperation = (
+                            str(existing["type"]) == "debt_repayment"
+                            and int(existing["amount"]) == normalizedAmount
+                            and existing["from_user"] == normalizedUserId
+                            and existing["to_user"] is None
+                            and existing["actor_user_id"] == normalizedUserId
+                        )
+                        balanceRow = self.connection.execute(
+                            "SELECT credits FROM users WHERE user_id = ?", (normalizedUserId,)
+                        ).fetchone()
+                        debtRow = self.connection.execute(
+                            "SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedUserId,)
+                        ).fetchone()
+                        balance = int(balanceRow["credits"]) if balanceRow else None
+                        debt = int(debtRow["amount"]) if debtRow else 0
+                        self.connection.rollback()
+                        return ("duplicate" if sameOperation else "idempotency_conflict"), balance, debt
+
+                self._EnsureUserWithinTransaction(normalizedUserId, self.GetDefaultJoinCredits())
+                balanceRow = self.connection.execute(
+                    "SELECT credits FROM users WHERE user_id = ?", (normalizedUserId,)
+                ).fetchone()
+                debtRow = self.connection.execute(
+                    "SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedUserId,)
+                ).fetchone()
+                balance = int(balanceRow["credits"])
+                debt = int(debtRow["amount"]) if debtRow else 0
+
+                if debt <= 0:
+                    self.connection.rollback()
+                    return "no_debt", balance, 0
+                if balance < normalizedAmount:
+                    self.connection.rollback()
+                    return "insufficient_credits", balance, debt
+                if normalizedAmount > debt:
+                    self.connection.rollback()
+                    return "exceeds_debt", balance, debt
+
+                cursor = self.connection.execute(
+                    "UPDATE users SET credits = credits - ? WHERE user_id = ? AND credits >= ?",
+                    (normalizedAmount, normalizedUserId, normalizedAmount),
+                )
+                if cursor.rowcount != 1:
+                    self.connection.rollback()
+                    return "insufficient_credits", balance, debt
+
+                remainingDebt = debt - normalizedAmount
+                self.connection.execute(
+                    "UPDATE credit_debts SET amount = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                    (remainingDebt, normalizedUserId),
+                )
+                self.connection.execute(
+                    """INSERT INTO transactions
+                       (ticket_id, from_user, to_user, amount, type, actor_user_id, note, idempotency_key)
+                       VALUES (NULL, ?, NULL, ?, 'debt_repayment', ?, ?, ?)""",
+                    (normalizedUserId, normalizedAmount, normalizedUserId,
+                     "Member-initiated debt repayment", normalizedKey),
+                )
+                newBalanceRow = self.connection.execute(
+                    "SELECT credits FROM users WHERE user_id = ?", (normalizedUserId,)
+                ).fetchone()
+                newBalance = int(newBalanceRow["credits"])
+                self.connection.commit()
+                return "repaid", newBalance, remainingDebt
+            except Exception:
+                self.connection.rollback()
+                raise
+
     def GetBalance(self, userId: int) -> int:
         row = self.GetUser(userId)
         if row is None:
