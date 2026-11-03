@@ -2108,16 +2108,26 @@ class GuildDatabase:
             self.connection.commit()
             return reportId
 
-    def ListScamReports(self, *, status: str | None = "open", limit: int = 10):
+    def ListScamReports(
+        self, *, status: str | None = "open", limit: int = 10,
+        reportType: str | None = None, offset: int = 0,
+    ):
+        """List reports with bounded pagination and an optional category filter."""
         safeLimit = max(1, min(25, int(limit)))
-        if status is None or status == "all":
-            return self.Execute(
-                "SELECT * FROM scam_reports ORDER BY report_id DESC LIMIT ?",
-                (safeLimit,), fetchAll=True,
-            )
+        safeOffset = max(0, int(offset))
+        conditions = []
+        parameters = []
+        if status is not None and status != "all":
+            conditions.append("status = ?")
+            parameters.append(str(status))
+        if reportType is not None and reportType != "all":
+            conditions.append("report_type = ?")
+            parameters.append(str(reportType))
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        parameters.extend((safeLimit, safeOffset))
         return self.Execute(
-            "SELECT * FROM scam_reports WHERE status = ? ORDER BY report_id DESC LIMIT ?",
-            (str(status), safeLimit), fetchAll=True,
+            f"SELECT * FROM scam_reports{where} ORDER BY report_id DESC LIMIT ? OFFSET ?",
+            tuple(parameters), fetchAll=True,
         )
 
     def ResolveScamReport(self, reportId: int, reviewedBy: int, decision: str, note: str = "") -> bool:
