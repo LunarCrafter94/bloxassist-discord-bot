@@ -294,21 +294,31 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             event = guildDatabase.GetActiveInviteEvent()
             if event is None:
                 return
+            previousDebt = guildDatabase.GetCreditDebt(usedInvite.inviter.id)
             status, newBalance, reward = guildDatabase.AwardInviteReward(
                 int(event["event_id"]), member.id, usedInvite.inviter.id, str(usedInvite.code)
             )
             if status == "awarded":
+                remainingDebt = guildDatabase.GetCreditDebt(usedInvite.inviter.id)
+                debtRepaid = max(0, previousDebt - remainingDebt)
+                rewardDescription = f"<@{usedInvite.inviter.id}> earned **{reward:,} credits** for inviting <@{member.id}>."
+                if debtRepaid:
+                    rewardDescription += f"\\n**{debtRepaid:,} credits** were automatically applied to outstanding debt."
                 rewardEmbed = discord.Embed(
                     title="🎟️ Invite reward awarded",
-                    description=f"<@{usedInvite.inviter.id}> received **{reward:,} credits** for inviting <@{member.id}>.",
+                    description=rewardDescription,
                     color=discord.Color.green(), timestamp=discord.utils.utcnow(),
                 )
                 rewardEmbed.add_field(name="Invite event", value=f"#{int(event['event_id'])}", inline=True)
                 rewardEmbed.add_field(name="New inviter balance", value=f"{int(newBalance or 0):,} credits", inline=True)
+                rewardEmbed.add_field(name="Remaining debt", value=f"{remainingDebt:,} credits", inline=True)
                 rewardEmbed.add_field(name="Invite code", value=f"`{usedInvite.code}`", inline=True)
                 await SendAuditLog(member.guild, guildDatabase, rewardEmbed)
                 try:
-                    await usedInvite.inviter.send(f"🎟️ You earned **{reward:,} credits** in **{member.guild.name}** for inviting a new member during invite event #{int(event['event_id'])}.")
+                    dmText = f"🎟️ You earned **{reward:,} credits** in **{member.guild.name}** for inviting a new member during invite event #{int(event['event_id'])}."
+                    if debtRepaid:
+                        dmText += f"\\n**{debtRepaid:,} credits** automatically repaid your outstanding debt. Remaining debt: **{remainingDebt:,} credits**."
+                    await usedInvite.inviter.send(dmText)
                 except discord.HTTPException:
                     logger.info("Could not DM inviter %s about reward in guild %s", usedInvite.inviter.id, member.guild.id)
 
