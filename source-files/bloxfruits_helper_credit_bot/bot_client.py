@@ -485,6 +485,8 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 amountText = f"{int(row['amount']):,} credits"
                 if row["type"] == "debt_repayment":
                     amountText = f"−{amountText} (debt repayment)"
+                elif row["type"] == "penalty_debt":
+                    amountText = f"−{amountText} (penalty)"
                 elif row["to_user"] == target.id:
                     amountText = f"+{amountText}"
                 elif row["from_user"] == target.id:
