@@ -1,0 +1,18 @@
+title = "BloxAssist Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Verified non-secret deterministic idempotency identifiers used in test fixtures."
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''tests/test_phase4_5_features\.py$''',
+  '''tests/test_database_isolation\.py$''',
+]
+regexes = [
+  '''idempotencyKey\s*=\s*"phase5-deduct-1"''',
+  '''idempotencyKey\s*=\s*"phase5-deduct-2"''',
+  '''idempotencyKey\s*=\s*"test-deduct-7101-insufficient"''',
+]
