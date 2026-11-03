@@ -673,6 +673,50 @@ class GuildDatabase:
             fetchAll=True,
         )
 
+    def _ApplyRewardAgainstDebtWithinTransaction(
+        self,
+        userId: int,
+        amount: int,
+        *,
+        actorUserId: int | None = None,
+        sourceNote: str,
+        ticketId: int | None = None,
+    ) -> tuple[int, int]:
+        """Apply earned credits to debt first; caller owns the active transaction."""
+        normalizedUserId = int(userId)
+        normalizedAmount = int(amount)
+        if normalizedAmount < 0:
+            raise ValueError("Reward amount cannot be negative.")
+        self._EnsureUserWithinTransaction(normalizedUserId, self.GetDefaultJoinCredits())
+        debtRow = self.connection.execute(
+            "SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedUserId,)
+        ).fetchone()
+        currentDebt = int(debtRow["amount"]) if debtRow else 0
+        repayment = min(currentDebt, normalizedAmount)
+        remainingDebt = currentDebt - repayment
+        availableCredit = normalizedAmount - repayment
+        if repayment:
+            self.connection.execute(
+                "UPDATE credit_debts SET amount = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                (remainingDebt, normalizedUserId),
+            )
+            self.connection.execute(
+                """INSERT INTO transactions
+                   (ticket_id, from_user, to_user, amount, type, actor_user_id, note)
+                   VALUES (?, ?, NULL, ?, 'debt_repayment', ?, ?)""",
+                (int(ticketId) if ticketId is not None else None, normalizedUserId,
+                 repayment, int(actorUserId) if actorUserId is not None else None,
+                 ("Automatic debt offset: " + str(sourceNote).strip())[:500]),
+            )
+        self.connection.execute(
+            "UPDATE users SET credits = credits + ? WHERE user_id = ?",
+            (availableCredit, normalizedUserId),
+        )
+        balanceRow = self.connection.execute(
+            "SELECT credits FROM users WHERE user_id = ?", (normalizedUserId,)
+        ).fetchone()
+        return int(balanceRow["credits"]), remainingDebt
+
     def ApplyPenaltyDebt(self, userId: int, amount: int, *, actorUserId: int, reason: str, idempotencyKey: str | None = None) -> tuple[str, int | None, int]:
         """Apply an audited penalty, using available credits before recording unpaid debt."""
         penalty = int(amount)
@@ -1880,10 +1924,10 @@ class GuildDatabase:
                     ]
 
                 for helperId, payoutAmount in payouts:
-                    self._EnsureUserWithinTransaction(helperId, defaultCredits)
-                    self.connection.execute(
-                        "UPDATE users SET credits = credits + ? WHERE user_id = ?",
-                        (payoutAmount, helperId),
+                    self._ApplyRewardAgainstDebtWithinTransaction(
+                        helperId, payoutAmount, actorUserId=actorUserId,
+                        sourceNote=f"ticket reward for ticket {normalizedTicketId}",
+                        ticketId=normalizedTicketId,
                     )
                     self.connection.execute(
                         """INSERT INTO transactions
@@ -2262,9 +2306,9 @@ class GuildDatabase:
                 if cursor.rowcount != 1:
                     self.connection.rollback()
                     return "duplicate", None, reward
-                self.connection.execute(
-                    "UPDATE users SET credits = credits + ? WHERE user_id = ?",
-                    (reward, int(inviterUserId)),
+                self._ApplyRewardAgainstDebtWithinTransaction(
+                    int(inviterUserId), reward,
+                    sourceNote=f"invite event #{int(eventId)} reward",
                 )
                 self.connection.execute(
                     """INSERT INTO transactions(ticket_id, from_user, to_user, amount, type, actor_user_id, note)
