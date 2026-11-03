@@ -659,6 +659,20 @@ class GuildDatabase:
         row = self.Execute("SELECT amount FROM credit_debts WHERE user_id = ?", (int(userId),), fetchOne=True)
         return int(row["amount"] or 0) if row else 0
 
+    def ListCreditTransactions(self, userId: int, *, limit: int = 10, offset: int = 0):
+        """Return recent ledger entries involving one member, newest first."""
+        normalizedLimit = max(1, min(int(limit), 100))
+        normalizedOffset = max(0, int(offset))
+        return self.Execute(
+            """SELECT id, ticket_id, from_user, to_user, amount, type,
+                      actor_user_id, note, created_at
+               FROM transactions
+               WHERE from_user = ? OR to_user = ?
+               ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (int(userId), int(userId), normalizedLimit, normalizedOffset),
+            fetchAll=True,
+        )
+
     def ApplyPenaltyDebt(self, userId: int, amount: int, *, actorUserId: int, reason: str, idempotencyKey: str | None = None) -> tuple[str, int | None, int]:
         """Apply an audited penalty, using available credits before recording unpaid debt."""
         penalty = int(amount)
