@@ -15,7 +15,7 @@ from .admin.dashboard_views import (
     RestoreSavedDashboardMessage,
 )
 from .credits.credit_service import CreditService
-from .audit import SendAuditLog
+from .audit import ResolveAuditChannel, SendAuditLog
 from .invites.invite_events import FetchInviteUseCounts, FindUsedInvite
 from .backups import PerServerBackupService
 from .interaction_utils import DeferEphemeralResponse, EditEphemeralOriginalResponse, SendEphemeralFollowup, SendEphemeralResponse
@@ -512,8 +512,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         except Exception:
             logger.exception("Core table diagnostics failed: guild=%s", interaction.guild_id)
             checks.append(("Core tables", False, "One or more required tables could not be queried"))
-        auditId = db.GetSetting("audit_log_channel_id", "") or ""
-        auditChannel = interaction.guild.get_channel(int(auditId)) if str(auditId).isdigit() else None
+        auditChannel = await ResolveAuditChannel(interaction.guild, db)
         if isinstance(auditChannel, discord.TextChannel):
             permissions = auditChannel.permissions_for(interaction.guild.me) if interaction.guild.me else None
             canAudit = bool(permissions and permissions.view_channel and permissions.send_messages and permissions.embed_links)
@@ -964,7 +963,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         embed = discord.Embed(title=f"📨 Open reports · {categoryText}", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
         embed.set_footer(text=f"Page {int(page)} · 5 reports per page · Use /reports page:<number> to navigate")
         if not rows:
-            embed.description = "There are no open reports."
+            embed.description = "No open reports were found on this page for the selected category."
         else:
             embed.description = "Use `/report-review` to confirm or dismiss a report after reviewing the available evidence."
             categoryLabels = {
