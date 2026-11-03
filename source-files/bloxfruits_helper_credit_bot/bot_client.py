@@ -383,7 +383,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         embed = discord.Embed(title="💰 Your credit account", color=discord.Color.blurple())
         embed.add_field(name="Available credits", value=f"**{amount:,}**", inline=True)
         embed.add_field(name="Outstanding debt", value=f"**{debt:,}**", inline=True)
-        embed.add_field(name="Total obligations", value=f"**{amount + debt:,}**", inline=True)
+        embed.add_field(name="Net position", value=f"**{amount - debt:+,}**", inline=True)
         if debt:
             embed.set_footer(text="Use /repay-debt to pay down your outstanding debt.")
         await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
