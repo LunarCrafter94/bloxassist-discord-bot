@@ -1649,7 +1649,7 @@ async def CompleteCurrentTicket(
     )
     unusedRefund = guildDatabase.GetCompletionRefundAmount(int(ticket["ticket_id"]))
     refundText = f" Unfilled helper-slot refund returned to requester: **{unusedRefund:,} credits**." if unusedRefund else ""
-    await EditEphemeralOriginalResponse(interaction, content=f"✅ Moderator override complete. Credits distributed: {payoutSummary or 'none'}.{refundText}")
+    await EditEphemeralOriginalResponse(interaction, content=f"✅ Moderator override complete. Gross rewards: {payoutSummary or 'none'}.{debtOffsetText}{refundText}")
 
 
 async def CancelUserTicket(interaction: discord.Interaction, databaseManager: DatabaseManager) -> None:
