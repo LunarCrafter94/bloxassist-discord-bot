@@ -6,6 +6,7 @@
 
 - Added atomic member-initiated debt repayment through `/repay-debt`.
 - Supports partial and full repayment; a repayment cannot exceed either the member's available credits or outstanding debt.
+- Future ticket and invite rewards automatically pay down outstanding debt before adding any remainder to the member's spendable balance. The original gross reward and the debt offset are both recorded in the ledger.
 - Records each repayment as a distinct `debt_repayment` transaction in the existing ledger.
 - Uses Discord interaction IDs as idempotency keys so retrying the same interaction cannot deduct credits twice.
 - Serializes PostgreSQL repayment operations by locking the member's balance row.
@@ -30,7 +31,7 @@
 
 ## Tests added
 
-- `tests/test_debt_repayment.py`: partial/full repayment, invalid amounts, no debt, insufficient credits, overpayment, idempotency conflicts, ledger entries, and credit-history pagination.
+- `tests/test_debt_repayment.py`: partial/full repayment, invalid amounts, no debt, insufficient credits, overpayment, idempotency conflicts, ledger entries, credit-history pagination, and automatic ticket-reward debt offsets.
 - `tests/test_report_pagination.py`: non-overlapping pages, category filtering, and all-category pagination.
 
 ## Verification still required
