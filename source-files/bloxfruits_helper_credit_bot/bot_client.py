@@ -776,7 +776,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         if status != "penalized":
             await EditEphemeralOriginalResponse(interaction, content=f"Penalty was not applied (status: {status}).")
             return
-        await EditEphemeralOriginalResponse(interaction, content=f"⚖️ Applied a {amount:,}-credit penalty to {member.mention}.\nCurrent credits: {balance:,}. Outstanding debt: {debt:,}.\nReason: {reason.strip()[:500]}\nMembers with debt cannot create/host services.")
+        await EditEphemeralOriginalResponse(interaction, content=f"⚖️ Applied a {amount:,}-credit penalty to {member.mention}.\nCurrent credits: {balance:,}. Outstanding debt: {debt:,}.\nReason: {reason.strip()[:500]}\nMembers with debt cannot create new tickets, but they can still be assigned as helpers. Completed-ticket rewards repay outstanding debt first.")
         embed = discord.Embed(title="⚖️ Credit penalty applied", color=discord.Color.red(), timestamp=discord.utils.utcnow())
         embed.add_field(name="Member", value=f"{member.mention} (`{member.id}`)", inline=False)
         embed.add_field(name="Applied by", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)

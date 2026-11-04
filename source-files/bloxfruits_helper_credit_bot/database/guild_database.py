@@ -1200,14 +1200,10 @@ class GuildDatabase:
                 self._EnsureUserWithinTransaction(normalizedCreatorId, defaultCredits)
                 for helperId in helpers:
                     self._EnsureUserWithinTransaction(helperId, defaultCredits)
+                # Requesters must clear debt before reserving a new ticket.
+                # Indebted members may still help; their earned reward is applied
+                # to outstanding debt first by _ApplyRewardAgainstDebtWithinTransaction.
                 debtRow = self.connection.execute("SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedCreatorId,)).fetchone()
-                debtorHelper = self.connection.execute(
-                    "SELECT user_id FROM credit_debts WHERE amount > 0 AND user_id IN (" + ",".join("?" for _ in helpers) + ")",
-                    tuple(helpers),
-                ).fetchone()
-                if debtorHelper is not None:
-                    self.connection.rollback()
-                    return None
                 if debtRow is not None and int(debtRow["amount"] or 0) > 0:
                     self.connection.rollback()
                     return None

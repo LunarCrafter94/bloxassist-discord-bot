@@ -7,6 +7,7 @@
 - Added atomic member-initiated debt repayment through `/repay-debt`.
 - Supports partial and full repayment; a repayment cannot exceed either the member's available credits or outstanding debt.
 - Future ticket and invite rewards automatically pay down outstanding debt before adding any remainder to the member's spendable balance. The original gross reward and the debt offset are both recorded in the ledger.
+- Members with outstanding debt may still be assigned as ticket helpers; their earned ticket rewards are applied to debt first. Members with debt remain unable to create/reserve new tickets as requesters.
 - Records each repayment as a distinct `debt_repayment` transaction in the existing ledger.
 - Uses Discord interaction IDs as idempotency keys so retrying the same interaction cannot deduct credits twice.
 - Serializes PostgreSQL repayment operations by locking the member's balance row.
@@ -40,7 +41,7 @@
 
 ## Tests added
 
-- `tests/test_debt_repayment.py`: partial/full repayment, invalid amounts, no debt, insufficient credits, overpayment, idempotency conflicts, ledger entries, credit-history pagination, and automatic ticket-reward debt offsets.
+- `tests/test_debt_repayment.py`: partial/full repayment, invalid amounts, no debt, insufficient credits, overpayment, idempotency conflicts, ledger entries, credit-history pagination, automatic ticket-reward debt offsets for an already-indebted helper, and continued requester-debt reservation blocking.
 - `tests/test_report_pagination.py`: non-overlapping pages, category filtering, and all-category pagination.
 - `tests/test_credit_privacy.py`: self, owner, Administrator, configured moderator, ordinary member, Manage Server-only, and non-guild debt-visibility boundaries; verifies `/credits` only queries and displays debt after authorization.
 - `tests/test_database_isolation.py`: verifies invite-attribution writes are committed before invite reward and penalty transactions begin.
@@ -51,10 +52,10 @@
 
 ## QA status — November 4, 2026
 
-- Local unit suite previously passed 106 tests before the latest three regression tests were added. Rerun the full suite after pulling the latest branch; the current expected count is 113.
+- Rerun the full suite after pulling the latest branch; the current expected count is 114. The latest debt-helper regression test verifies that an already-indebted helper can be reserved and that completed-ticket rewards repay debt before crediting the remainder.
 - Live Discord QA confirmed setup/dashboard initialization, public Help Center setup, SQLite/core-table/audit-channel diagnostics, balance and credit-history lookup, owner and Administrator `/credits` debt visibility, ordinary-member suppression of another member's debt field, manual `/penalty`, credit additions, partial/full debt repayment and overpayment rejection, invite event start/end, invite rewards with automatic debt offset, inviter leave penalties, and ticket creation/helper selection/completion/refunds.
 - The non-staff `/credits` privacy path was verified live: a member without roles saw another member's available credits but no debt field. The target's debt was zero during this check; hiding a non-zero debt value has not been separately demonstrated live.
-- Automatic ticket-reward debt offset is unit-tested but has not been independently verified live.
+- Live Discord QA confirmed automatic ticket-reward debt offset on ticket #105: CZareth Playz received a 100-credit gross reward, 50 credits were applied to outstanding debt, and the final state was 50 available credits with zero remaining debt. This live test applied the penalty after reservation to work around the then-existing helper-debt restriction; selecting an already-indebted helper still needs live confirmation after this change.
 - Live Discord QA verified non-empty `/reports` pagination with six reports: page 1 returned five reports (#6–#2), page 2 returned the remaining report (#1), and the Bug / Bot Issue category filter returned only reports #2 and #1.
 - Full transcript delivery, direct history links, and 100-message rolling transcript retention passed live QA.
 - Validate PostgreSQL behavior against a real PostgreSQL instance, not only the adapter unit tests.

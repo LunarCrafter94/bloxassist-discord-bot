@@ -104,34 +104,70 @@ class DebtRepaymentTests(unittest.TestCase):
         helperId = 555555555555555555
         self.db.CreateUser(requesterId, credits=200)
         self.db.CreateUser(helperId, credits=0)
+        self.assertEqual(
+            self.db.ApplyPenaltyDebt(
+                helperId, 50, actorUserId=9001, reason="debt before ticket assignment",
+                idempotencyKey="debt-before-ticket-assignment",
+            ),
+            ("penalized", 0, 50),
+        )
+
+        # An indebted helper must be accepted at reservation time. Their reward
+        # will clear the debt first and credit only the remainder to their balance.
         ticketId = self.db.ReserveTicket(
             channelId=777777777777777777,
             creatorId=requesterId,
             eventKey="debt_reward_test",
             helperIds=[helperId],
             requiredCredits=100,
+            pricePerHelper=100,
         )
         self.assertIsNotNone(ticketId)
-        self.assertEqual(
-            self.db.ApplyPenaltyDebt(
-                helperId, 150, actorUserId=9001, reason="debt before payout",
-                idempotencyKey="debt-before-payout",
-            ),
-            ("penalized", 0, 150),
-        )
 
         status, payouts = self.db.CompleteTicket(ticketId, actorUserId=9001, note="test payout")
         self.assertEqual(status, "completed")
         self.assertEqual(payouts, [(helperId, 100)])
-        self.assertEqual(self.db.GetBalance(helperId), 0)
-        self.assertEqual(self.db.GetCreditDebt(helperId), 50)
+        self.assertEqual(self.db.GetBalance(helperId), 50)
+        self.assertEqual(self.db.GetCreditDebt(helperId), 0)
+
         offset = self.db.Execute(
             "SELECT * FROM transactions WHERE ticket_id = ? AND type = 'debt_repayment'",
             (ticketId,), fetchOne=True,
         )
         self.assertIsNotNone(offset)
-        self.assertEqual(int(offset["amount"]), 100)
+        self.assertEqual(int(offset["amount"]), 50)
         self.assertIn("Automatic debt offset", str(offset["note"]))
+
+        reward = self.db.Execute(
+            "SELECT * FROM transactions WHERE ticket_id = ? AND type = 'ticket_reward'",
+            (ticketId,), fetchOne=True,
+        )
+        self.assertIsNotNone(reward)
+        self.assertEqual(int(reward["amount"]), 100)
+        self.assertEqual(int(reward["from_user"]), requesterId)
+        self.assertEqual(int(reward["to_user"]), helperId)
+
+    def testRequesterWithOutstandingDebtCannotReserveTicket(self):
+        helperId = 555555555555555555
+        self.db.CreateUser(helperId, credits=0)
+
+        ticketId = self.db.ReserveTicket(
+            channelId=777777777777777778,
+            creatorId=self.userId,
+            eventKey="requester_debt_test",
+            helperIds=[helperId],
+            requiredCredits=100,
+            pricePerHelper=100,
+        )
+
+        self.assertIsNone(ticketId)
+        self.assertEqual(self.db.GetBalance(self.userId), 0)
+        self.assertEqual(self.db.GetCreditDebt(self.userId), 150)
+        ticketCount = self.db.Execute(
+            "SELECT COUNT(*) AS count FROM tickets WHERE creator_id = ?",
+            (self.userId,), fetchOne=True,
+        )
+        self.assertEqual(int(ticketCount["count"]), 0)
 
     def testCreditHistoryIncludesRepaymentsAndSupportsPagination(self):
         self.addCredits()
