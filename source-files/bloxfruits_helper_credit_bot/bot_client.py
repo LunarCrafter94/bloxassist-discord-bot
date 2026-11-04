@@ -303,7 +303,17 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 return
             # Save attribution even outside an active reward event so leave penalties
             # can only ever affect the inviter actually identified for this member.
-            guildDatabase.RecordInviteAttribution(member.id, usedInvite.inviter.id, str(usedInvite.code))
+            repeatLeavePenalty = (
+                guildDatabase.GetSetting("invite_leave_penalty_repeat_on_rejoin", "false") or "false"
+            ).lower() in {"true", "1", "yes", "on"}
+            joinedAt = member.joined_at.isoformat() if member.joined_at is not None else None
+            guildDatabase.RecordInviteAttribution(
+                member.id,
+                usedInvite.inviter.id,
+                str(usedInvite.code),
+                repeatOnRejoin=repeatLeavePenalty,
+                joinedAt=joinedAt,
+            )
             event = guildDatabase.GetActiveInviteEvent()
             if event is None:
                 return
@@ -359,12 +369,17 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                     penalty,
                     actorUserId=self.user.id if self.user is not None else member.guild.owner_id,
                     reason=f"Invite penalty: invited member {member.id} left the server (invite {str(attribution['invite_code'])[:80] or 'unknown'})",
-                    idempotencyKey=f"invite-leave-penalty:{member.guild.id}:{member.id}",
+                    idempotencyKey=(
+                        f"invite-leave-penalty:{member.guild.id}:{member.id}:"
+                        f"{int(attribution['join_cycle'] or 1)}"
+                    ),
                 )
                 if status not in {"penalized", "duplicate"}:
                     logger.warning("Invite leave penalty not applied: guild=%s invited=%s inviter=%s status=%s", member.guild.id, member.id, inviterId, status)
                     return
-                guildDatabase.MarkInviteLeavePenaltyApplied(member.id)
+                guildDatabase.MarkInviteLeavePenaltyApplied(
+                    member.id, joinCycle=int(attribution["join_cycle"] or 1)
+                )
                 if status == "penalized":
                     embed = discord.Embed(
                         title="⚖️ Inviter leave penalty applied",
