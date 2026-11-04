@@ -77,6 +77,16 @@ def _message_id_from_event(event_key: str) -> int | None:
         return None
 
 
+async def _delete_fixture_message(message: Any, not_found_error: type[BaseException]) -> bool:
+    """Delete one fixture post; return False when retention already removed it."""
+    try:
+        # discord.py PartialMessage.delete() does not accept a reason keyword.
+        await message.delete()
+        return True
+    except not_found_error:
+        return False
+
+
 async def _connect_discord(token: str):
     try:
         import discord
@@ -230,11 +240,16 @@ async def _cleanup(args, project_root: Path, token: str) -> None:
         db = manager.ForServer(args.guild_id)
         marker = f"{MESSAGE_PREFIX} run={args.run_id} "
         deleted_messages = 0
+        already_missing_messages = 0
         # Delete only messages authored by this bot that contain this exact run marker.
+        # Retention may already have removed the oldest fixture posts, so missing
+        # messages are expected and must not block removal of the matching DB fixtures.
         async for message in channel.history(limit=1000, oldest_first=True):
             if message.author.id == client.user.id and marker in message.content:
-                await message.delete(reason=f"Remove BloxAssist transcript-retention test fixture {args.run_id}")
-                deleted_messages += 1
+                if await _delete_fixture_message(message, discord_module.NotFound):
+                    deleted_messages += 1
+                else:
+                    already_missing_messages += 1
                 await asyncio.sleep(0.35)
 
         fixture_prefix = _fixture_key(args.run_id)
@@ -282,7 +297,8 @@ async def _cleanup(args, project_root: Path, token: str) -> None:
                 raise
 
         print(f"Cleanup complete for run {args.run_id}.")
-        print(f"Deleted dummy Discord posts: {deleted_messages} (already-pruned posts are absent).")
+        print(f"Deleted dummy Discord posts: {deleted_messages}.")
+        print(f"Already-pruned/missing dummy Discord posts: {already_missing_messages}.")
         print(f"Deleted dummy ticket rows: {len(ticket_ids)}; removed their test-only ledger rows and synthetic accounts.")
     finally:
         manager.CloseAll()
