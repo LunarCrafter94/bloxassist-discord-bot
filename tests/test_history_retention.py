@@ -96,6 +96,33 @@ class TicketHistoryRetentionTests(unittest.TestCase):
         self.assertEqual(int(old_transactions), 0)
         self.assertEqual(self.db.GetBalance(first_requester), original_balance)
 
+    def test_member_ticket_history_pages_do_not_overlap(self):
+        requester = 880010
+        helper = 880011
+        createdIds = []
+        for index in range(12):
+            ticketId = self.db.ReserveTicket(
+                channelId=4000000 + index,
+                creatorId=requester,
+                eventKey="ticket_history_pagination_test",
+                helperIds=[helper],
+                requiredCredits=0,
+            )
+            self.assertIsNotNone(ticketId)
+            createdIds.append(int(ticketId))
+            self.assertEqual(self.db.RefundTicket(ticketId)[0], "refunded")
+
+        first = self.db.ListTicketHistoryForMember(requester, limit=6, offset=0)
+        second = self.db.ListTicketHistoryForMember(requester, limit=6, offset=6)
+        firstIds = [int(row["ticket_id"]) for row in first]
+        secondIds = [int(row["ticket_id"]) for row in second]
+
+        self.assertEqual(len(firstIds), 6)
+        self.assertEqual(len(secondIds), 6)
+        self.assertFalse(set(firstIds).intersection(secondIds))
+        self.assertEqual(firstIds, list(reversed(createdIds[-6:])))
+        self.assertEqual(secondIds, list(reversed(createdIds[:6])))
+
     def test_clearing_a_pruned_discord_message_does_not_erase_transcript_saved_marker(self):
         ticket_id, _ = self._create_closed_saved_ticket(999)
         self.db.ClearTicketTranscriptMessage(ticket_id)
