@@ -57,6 +57,18 @@
 - `tests/test_interaction_utils.py`: verifies an already-removed ephemeral original response is non-fatal.
 - `tests/test_transcript_retention_cleanup.py`: verifies fixture cleanup can delete partial messages and tolerate posts already removed by retention.
 
+## PostgreSQL live integration QA — November 4, 2026
+
+- Installed and started local PostgreSQL 18.6 on Windows with a dedicated `bloxassist_qa` database and least-privilege login role; production Supabase was not modified.
+- Migrated the QA SQLite database for server `1560356320954294313` into schema `server_1560356320954294313`. The migration imported and verified 11 application tables: users (4), services (7), settings (17), invite_events (5), tickets (6), transactions (49), transaction_audit_deliveries (14), invite_rewards (3), credit_debts (4), invite_attributions (1), and scam_reports (6), for 116 rows total.
+- A read-only comparison confirmed SQLite integrity and exact column and row-content matches for all 11 source/target tables.
+- Started the bot successfully in PostgreSQL mode; startup logs confirmed the server-specific PostgreSQL schema, Discord gateway connection, and synchronization of 18 slash commands.
+- Live `/diagnostics` confirmed PostgreSQL reachable, core tables queryable, and the configured audit channel available.
+- Live balance and credit-history reads succeeded. CZareth Playz's ticket #106 reward and automatic debt-repayment transactions (#449 and #448) were present after migration; the account showed 50 available credits and zero debt. Hollow Saviour showed zero available credits and zero debt.
+- Live PostgreSQL credit-write QA passed: owner-authorized `/add` added 1 credit to Hollow Saviour and produced an audit entry; `/deduct` removed that credit and produced a separate audit entry. The subsequent balance check returned to zero available credits and zero debt.
+- The automated DM backup warning appeared because backup recipient/password settings were not configured; this did not prevent startup or PostgreSQL operation. Backup delivery/restore has not yet been live-verified against PostgreSQL.
+- The 119-test unit suite passed before migration. These tests supplement, but do not replace, live verification of the complete PostgreSQL ticket and invite workflows.
+
 ## QA status — November 4, 2026
 
 - Pulled the latest `development/v0.10.0` branch and ran the full suite: **114 tests passed in 14.295 seconds** (`OK`). This includes the regression tests proving that an already-indebted helper can be reserved and that a requester with debt remains blocked.
