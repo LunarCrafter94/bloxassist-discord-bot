@@ -313,6 +313,33 @@ class PerGuildDatabaseTests(unittest.TestCase):
         newTicket = self.guildA.GetTicketById(newTicketId)
         self.assertEqual(TicketLabelFromRow(newTicket), "004")
 
+    def testRecordInviteAttributionCommitsBeforeInviteRewardTransaction(self):
+        status, eventId, _ = self.guildA.StartInviteEvent(75, 60, startedBy=1234)
+        self.assertEqual(status, "started")
+        self.assertTrue(self.guildA.RecordInviteAttribution(22011, 22012, "invite-code"))
+        self.assertFalse(self.guildA.connection.in_transaction)
+
+        result = self.guildA.AwardInviteReward(
+            eventId, invitedUserId=22011, inviterUserId=22012, inviteCode="invite-code"
+        )
+        self.assertEqual(result[0], "awarded")
+        self.assertEqual(result[1], 175)
+        self.assertFalse(self.guildA.connection.in_transaction)
+
+    def testMarkInviteLeavePenaltyAppliedCommitsBeforeNextTransaction(self):
+        self.guildA.Execute(
+            "INSERT INTO invite_attributions(invited_user_id, inviter_user_id, invite_code) VALUES (?, ?, ?)",
+            (22111, 22112, "leave-code"),
+        )
+        self.assertTrue(self.guildA.MarkInviteLeavePenaltyApplied(22111))
+        self.assertFalse(self.guildA.connection.in_transaction)
+
+        status, balance, debt = self.guildA.ApplyPenaltyDebt(
+            22112, 125, actorUserId=1234, reason="leave penalty QA"
+        )
+        self.assertEqual((status, balance, debt), ("penalized", 0, 25))
+        self.assertFalse(self.guildA.connection.in_transaction)
+
     def testInviteRewardEventsAreTimedAndAwardInviterOnce(self):
         status, eventId, endsAt = self.guildA.StartInviteEvent(75, 60, startedBy=1234)
         self.assertEqual(status, "started")
