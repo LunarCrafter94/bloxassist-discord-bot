@@ -20,6 +20,14 @@ except ModuleNotFoundError as error:
 
 
 class SetupCommandTests(unittest.TestCase):
+    def test_invite_reward_messages_use_real_line_breaks(self):
+        sourcePath = SOURCE_ROOT / "bloxfruits_helper_credit_bot" / "bot_client.py"
+        source = sourcePath.read_text(encoding="utf-8")
+        self.assertIn('rewardDescription += f"\\n**', source)
+        self.assertIn('dmText += f"\\n**', source)
+        self.assertNotIn('rewardDescription += f"\\\\n**', source)
+        self.assertNotIn('dmText += f"\\\\n**', source)
+
     @unittest.skipIf(CreateBot is None, "discord.py is not installed in this validation environment")
     def test_setup_has_public_tickets_and_admin_dashboard_subcommands(self):
         with tempfile.TemporaryDirectory() as tempDir:
