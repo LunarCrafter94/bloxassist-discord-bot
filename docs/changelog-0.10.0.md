@@ -40,6 +40,11 @@
 - Added page navigation and optional category filtering to `/reports`.
 - Database report queries now support bounded limits, offsets, status filters, and category filters.
 
+## PostgreSQL backup restore
+
+- Updated `tools/Restore-Postgres-Server-Backup.py` to recognize and restore all 11 current v0.10.0 application tables, including `transaction_audit_deliveries`, `credit_debts`, and `invite_attributions`. The deletion order removes dependent rows before parent rows, and serial sequences are reset after import.
+- Added regression coverage ensuring the PostgreSQL restore table list matches the full application schema and that foreign-key-dependent rows are deleted in a safe order.
+
 ## PostgreSQL migration safety
 
 - Updated the SQLite-to-PostgreSQL migration utility to include the v0.10.0 `transaction_audit_deliveries`, `credit_debts`, and `invite_attributions` tables. Fresh-target checks and deletion ordering cover these tables as well.
