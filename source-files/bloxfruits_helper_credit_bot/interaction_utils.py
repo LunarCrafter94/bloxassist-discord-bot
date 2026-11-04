@@ -125,6 +125,9 @@ async def SendEphemeralResponse(
     """Send an ephemeral original response and remove it after one minute."""
     kwargs.pop("ephemeral", None)
     kwargs.pop("delete_after", None)
+    # discord.py expects MISSING rather than None when no View is attached.
+    if kwargs.get("view") is None:
+        kwargs.pop("view", None)
     if _IsExpiredInteraction(interaction):
         return None
     try:
