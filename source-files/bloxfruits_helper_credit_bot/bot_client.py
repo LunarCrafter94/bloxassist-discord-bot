@@ -365,21 +365,25 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             if inviterId == int(member.id) or (self.user is not None and inviterId == self.user.id):
                 return
             try:
+                joinCycle = int(attribution["join_cycle"] or 1)
+                # Preserve the original one-time key for cycle 1 so an upgrade
+                # cannot re-charge a penalty that an older build committed before
+                # it failed to mark the attribution row.
+                penaltyKey = f"invite-leave-penalty:{member.guild.id}:{member.id}"
+                if joinCycle > 1:
+                    penaltyKey += f":{joinCycle}"
                 status, balance, debt = guildDatabase.ApplyPenaltyDebt(
                     inviterId,
                     penalty,
                     actorUserId=self.user.id if self.user is not None else member.guild.owner_id,
                     reason=f"Invite penalty: invited member {member.id} left the server (invite {str(attribution['invite_code'])[:80] or 'unknown'})",
-                    idempotencyKey=(
-                        f"invite-leave-penalty:{member.guild.id}:{member.id}:"
-                        f"{int(attribution['join_cycle'] or 1)}"
-                    ),
+                    idempotencyKey=penaltyKey,
                 )
                 if status not in {"penalized", "duplicate"}:
                     logger.warning("Invite leave penalty not applied: guild=%s invited=%s inviter=%s status=%s", member.guild.id, member.id, inviterId, status)
                     return
                 guildDatabase.MarkInviteLeavePenaltyApplied(
-                    member.id, joinCycle=int(attribution["join_cycle"] or 1)
+                    member.id, joinCycle=joinCycle
                 )
                 if status == "penalized":
                     embed = discord.Embed(
