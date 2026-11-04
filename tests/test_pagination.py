@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import sys
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "source-files"
 if str(SOURCE_ROOT) not in sys.path:
@@ -121,6 +121,18 @@ class EphemeralPaginatorTests(unittest.IsolatedAsyncioTestCase):
         access_check.assert_called_once_with(interaction)
         self.assertTrue(view.is_finished())
         interaction.response.send_message.assert_awaited_once()
+
+    async def test_timeout_disables_controls_and_edits_original_response(self):
+        view, _ = self.make_view()
+
+        with patch(
+            "bloxfruits_helper_credit_bot.pagination.EditEphemeralOriginalResponse",
+            new_callable=AsyncMock,
+        ) as edit_response:
+            await view.on_timeout()
+
+        self.assertTrue(all(item.disabled for item in view.children))
+        edit_response.assert_awaited_once_with(view.originInteraction, view=view)
 
 
 if __name__ == "__main__":
