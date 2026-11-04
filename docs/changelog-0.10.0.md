@@ -21,7 +21,7 @@
 - Treat an already auto-deleted ephemeral completion response as non-fatal, so a slow transcript-retention pass cannot make a completed ticket appear to have failed.
 - Committed successful invite-attribution inserts and leave-penalty attribution updates before later explicit SQLite transactions begin, preventing nested-transaction failures on the shared per-server connection.
 - Corrected invite reward audit-embed and inviter-DM line breaks so automatic debt-offset details render on separate lines.
-- Added an owner-configurable Admin Dashboard option for inviter leave penalties: one penalty per invited member (default) or one penalty for each distinct attributed rejoin/leave cycle. Cycle tracking uses the Discord member join timestamp, stores a per-member cycle counter, and derives a unique idempotency key per cycle so duplicate events cannot charge twice. Existing SQLite and PostgreSQL databases add the new attribution columns automatically.
+- Added an owner-configurable Admin Dashboard option for inviter leave penalties: one penalty per invited member (default) or one penalty for each distinct attributed rejoin/leave cycle. Cycle tracking uses the Discord member join timestamp, stores a per-member cycle counter, and uses a cycle-specific idempotency key after the first cycle so duplicate events cannot charge twice. The first-cycle key remains backward-compatible with earlier builds. Leave handling matches the departing member timestamp to the stored cycle, preventing a delayed leave event from penalizing a newer rejoin. Existing SQLite and PostgreSQL databases add the new attribution columns automatically.
 
 ## Credit history
 
@@ -75,7 +75,7 @@
 - Live PostgreSQL member-initiated debt repayment QA passed: after Hollow Saviour incurred 50 credits of debt, an additional 100-credit owner adjustment gave sufficient available funds; `/repay-debt` repaid the full 50-credit debt and left 50 available credits. The debt-repayment notification confirmed zero remaining debt. This verifies full repayment on PostgreSQL; a distinct partial repayment that leaves some debt outstanding remains to be tested.
 
 - The automated DM backup warning appeared because backup recipient/password settings were not configured; this did not prevent startup or PostgreSQL operation. Backup delivery/restore has not yet been live-verified against PostgreSQL.
-- The 119-test unit suite passed before the configurable repeat-per-rejoin policy was added. Six additional regression tests now cover the setting, join-cycle idempotency, legacy schema upgrade, and PostgreSQL migration defaults; the updated suite is expected to contain 125 tests and still needs to be run locally. The newly added per-join-cycle behavior also needs live PostgreSQL verification after the bot is restarted and the schema upgrade runs.
+- The 119-test unit suite passed before the configurable repeat-per-rejoin policy was added. Seven additional regression tests now cover the setting, join-cycle idempotency, legacy timestamp compatibility, stale-event protection, legacy schema upgrade, and PostgreSQL migration defaults; the updated suite is expected to contain 126 tests and still needs to be run locally. The newly added per-join-cycle behavior also needs live PostgreSQL verification after the bot is restarted and the schema upgrade runs.
 
 ## QA status — November 4, 2026
 
