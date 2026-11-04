@@ -353,7 +353,7 @@ class PerGuildDatabaseTests(unittest.TestCase):
         firstAttribution = self.guildA.GetInviteAttribution(invitedId)
         self.assertEqual(int(firstAttribution["join_cycle"]), 1)
 
-        firstKey = f"invite-leave-penalty:111111111111111111:{invitedId}:1"
+        firstKey = f"invite-leave-penalty:111111111111111111:{invitedId}"
         firstPenalty = self.guildA.ApplyPenaltyDebt(
             inviterId, 50, actorUserId=1234, reason="first leave",
             idempotencyKey=firstKey,
