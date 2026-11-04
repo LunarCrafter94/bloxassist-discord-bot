@@ -13,6 +13,8 @@
 - Serializes PostgreSQL repayment operations by locking the member's balance row.
 - Updated `/balance` to show available credits, outstanding debt, and net position.
 - Updated `/credits` to show available credits to all members, while limiting another member's debt details to that member, the server owner, Administrators, and configured dashboard moderators.
+- Added a numeric `user_id` lookup option to `/credits` and `/credit-history`, allowing staff to inspect retained accounts and transaction history for former server members without requiring a live Discord Member object. IDs are accepted as text to preserve the full 64-bit Discord snowflake range; missing former-member accounts are not silently created.
+- Added a global application-command error handler that responds privately to invalid member selections and other command failures instead of leaving users with an unhandled interaction.
 
 ## Invite reliability and notifications
 
@@ -22,6 +24,7 @@
 - Committed successful invite-attribution inserts and leave-penalty attribution updates before later explicit SQLite transactions begin, preventing nested-transaction failures on the shared per-server connection.
 - Corrected invite reward audit-embed and inviter-DM line breaks so automatic debt-offset details render on separate lines.
 - Added an owner-configurable Admin Dashboard option for inviter leave penalties: one penalty per invited member (default) or one penalty for each distinct attributed rejoin/leave cycle. Cycle tracking uses the Discord member join timestamp, stores a per-member cycle counter, and uses a cycle-specific idempotency key after the first cycle so duplicate events cannot charge twice. The first-cycle key remains backward-compatible with earlier builds. Leave handling matches the departing member timestamp to the stored cycle, preventing a delayed leave event from penalizing a newer rejoin. Existing SQLite and PostgreSQL databases add the new attribution columns automatically.
+- Replaced raw UTC end-time displays for invite reward events with Discord relative-time countdowns in the start confirmation, audit embed, and Admin Dashboard. Discord renders the countdown in each viewer's locale; `run_forever` events display as Forever. Persisted end instants remain the source of truth for automatic expiry across restarts, and starting/ending/automatic expiry now refreshes the Admin Dashboard.
 
 ## Credit history
 
