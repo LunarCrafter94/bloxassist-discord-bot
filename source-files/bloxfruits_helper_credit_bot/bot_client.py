@@ -12,6 +12,7 @@ from discord import app_commands
 from .admin.dashboard_views import (
     CreateOrUpdateDashboard,
     GetDashboardModeratorRoleIds,
+    RefreshDashboardMessage,
     RestoreSavedDashboardMessage,
 )
 from .credits.credit_service import CreditService
