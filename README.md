@@ -6,11 +6,9 @@
 
 A slash-command Discord bot for multi-server ticket support and credit balances. Each Discord server has isolated data, ticket numbering, services, settings, audit records, and invite-reward event history.
 
+> **🧪 Beta status and deployment scope (as of November 4, 2026):** BloxAssist is still in beta. It has only been deployed in one small real Discord server and one separate testing server. This is a very limited deployment, not broad production testing across multiple communities or at scale. Automated tests have passed, but they do not replace extensive live testing with different users, permissions, and server configurations. Bugs and edge cases may remain. Test new or changed workflows in a separate server first, keep independent backups, and verify important credit and ticket records rather than relying on the bot as the sole source of truth.
 
-
-> **🧪 Beta status and deployment scope (as of November 3, 2026):** BloxAssist is still in beta. It has only been deployed in **one small real Discord server** and **one separate testing server**. This is a very limited deployment, not broad production testing across multiple communities or at scale. Automated tests have passed, but they do not replace extensive live testing with different users, permissions, and server configurations. Bugs and edge cases may remain. Test new or changed workflows in a separate server first, keep independent backups, and verify important credit and ticket records rather than relying on the bot as the sole source of truth.
-
-> **Current source status:** The published v0.9.0 pre-release tag is unchanged; `main` also contains unreleased follow-up fixes for ticket-helper selection, general issue reporting, and the inviter-penalty modal. See [`docs/release_history.md`](docs/release_history.md) for the difference. The v0.9.0 feature inventory is in [`docs/changelog-0.9.0.md`](docs/changelog-0.9.0.md). Live Discord acceptance testing is still required for debt, penalties, report delivery, audit logging, and PostgreSQL/backup deployment.
+> **Current source status:** This branch, `development/v0.10.0`, contains unreleased v0.10.0 development work. The published v0.9.0 pre-release tag remains unchanged. See [`docs/release_history.md`](docs/release_history.md), [`docs/changelog-0.9.0.md`](docs/changelog-0.9.0.md), and [`docs/changelog-0.10.0.md`](docs/changelog-0.10.0.md) for release history and development changes.
 
 ## AI-assisted development disclosure
 
@@ -22,7 +20,7 @@ BloxAssist is a heavily AI-assisted project and can fairly be described as “vi
 - Persistent ticket workflow: requester proposes completion/cancellation, active helpers confirm, helpers may leave, and replacement helpers require staff approval.
 - Configurable per-server Admin Dashboard, event catalog, starting credits for new accounts, helper limits, moderator roles, ticket staff policy, Help Center placement, and audit/transcript channel.
 - `/add` and `/deduct` are restricted to the actual server owner and write actor/reason details to the transaction ledger and configured audit channel.
-- `/add` and `/deduct` require a reason. Owner-only `/penalty` can consume available credits and create separate debt for unpaid penalties; members with debt cannot request a service ticket or be selected as a helper.
+- `/add` and `/deduct` require a reason. Owner-only `/penalty` can consume available credits and create separate debt for unpaid penalties. Members with debt cannot create/reserve tickets as requesters, but they may still be assigned as helpers; their completed-ticket rewards repay debt first.
 - **v0.10.0 development:** `/balance` and `/credits` show outstanding debt; `/repay-debt` supports partial/full repayment with atomic balance/debt updates and an idempotent ledger record; future ticket and invite rewards automatically pay down debt first; `/credit-history` provides paginated member transaction history; owner-only `/diagnostics` checks database tables and audit-channel permissions; `/reports` adds category filters and pagination.
 - The server owner can set an **Inviter Leave Penalty** in the Admin Dashboard. It applies only to a recorded inviter when attribution is reliable; `0` disables it.
 - Ticket reservations, payouts, unused-slot refunds, refunds, invite rewards, and penalties have individual audit entries where implemented, with actor/reason/ledger details when available.
@@ -46,25 +44,25 @@ The database stores `users`, `tickets`, `transactions`, `settings`, `services`, 
 
 ### PostgreSQL (experimental until live-tested)
 
-Set `DATABASE_BACKEND=postgresql` and `DATABASE_URL` in `private-configs/credentials.env` or the hosting provider's secret/environment settings. The bot creates a separate PostgreSQL schema named `server_<Discord server ID>` for each guild, preserving server-level isolation inside a hosted PostgreSQL database.
+Set `DATABASE_BACKEND=postgresql` and `DATABASE_URL` in `private-configs/credentials.env` or your bot hosting service's secret/environment settings. The bot creates a separate PostgreSQL schema named `server_<Discord server ID>` for each guild, preserving server-level isolation inside a hosted PostgreSQL database.
 
-Before switching a real deployment, stop the bot and place recoverable SQLite database files under `data/servers/`. Run `tools/Migrate-SQLite-To-Postgres.py`; it checks that the target schemas are fresh, asks for explicit confirmation, imports each server's records, resets serial sequences, and checks row counts. It is intentionally refusing to overwrite non-empty target schemas. Compare balances, tickets, settings, and ledger history manually before pointing production at PostgreSQL.
+Before switching a real deployment, stop the bot and place recoverable SQLite database files under `data/servers/`. Run `tools/Migrate-SQLite-To-Postgres.py`; it checks that the target schemas are fresh, asks for explicit confirmation, imports each server's records, resets serial sequences, and checks row counts. It intentionally refuses to overwrite non-empty target schemas. Compare balances, tickets, settings, and ledger history manually before pointing a live deployment at PostgreSQL.
 
 ## Setup
 
-1. Install Python 3.13 or newer, then run `python -m pip install -r requirements.txt`. For Falix, select Python 3.13.
-2. Copy `private-configs/credentials.env.example` to `private-configs/credentials.env` for local use and fill in `DISCORD_TOKEN`. On Falix, use panel environment/secret variables instead of uploading real credentials. Leave `DATABASE_BACKEND=sqlite` for the first host test. Add `DATABASE_URL` only when a PostgreSQL database is ready.
-3. Start locally with `python RunBot.py`. For Falix's Python template, set the Main file to `app.py` if available; that launcher delegates to the existing `RunBot.py` entry point.
+1. Install Python 3.13 or newer, then run `python -m pip install -r requirements.txt`.
+2. For local use, copy `private-configs/credentials.env.example` to `private-configs/credentials.env` and fill in `DISCORD_TOKEN`. For bot hosting services, configure secrets/environment variables through the host's supported settings instead of uploading real credentials. Leave `DATABASE_BACKEND=sqlite` for the first host test. Add `DATABASE_URL` only when a PostgreSQL database is ready.
+3. Start locally with `python RunBot.py`. For a hosted deployment, configure the Python runtime and startup command to run `python RunBot.py`. Consult your hosting service's documentation for its panel-specific settings.
 4. In a staff-only channel, run `/setup admin_dashboard`. Set an **Audit Log Channel** where the bot can send messages, embed links, attach files, and read message history. This channel receives ticket transcripts, credit movement audit entries, invite reward logs, and general moderation reports.
 5. Run `/setup public_tickets` in the public Help Center channel. Test in a development Discord server before using real balances.
 
-For a free host test, see [`docs/falix_free_test.md`](docs/falix_free_test.md). See [`docs/installation_and_operations.md`](docs/installation_and_operations.md) for full environment, permissions, migration, backup, and verification steps; [`docs/backup_and_restore.md`](docs/backup_and_restore.md) for backup/restore details; and [`docs/release_history.md`](docs/release_history.md) for the current change summary and [`docs/changelog-0.9.0.md`](docs/changelog-0.9.0.md) for the full v0.9.0 feature changelog.
+For full environment, permissions, migration, backup, and verification steps, see [`docs/installation_and_operations.md`](docs/installation_and_operations.md). See [`docs/backup_and_restore.md`](docs/backup_and_restore.md) for backup/restore details, [`docs/release_history.md`](docs/release_history.md) for release history, and [`docs/changelog-0.10.0.md`](docs/changelog-0.10.0.md) for the v0.10.0 development changelog.
 
 Historical install/changelog files are archived in [`docs/history/releases/historical-installation-and-changelogs.zip`](docs/history/releases/historical-installation-and-changelogs.zip). They are reference material only; use the maintained docs linked above for current instructions.
 
 ## Backup settings
 
-Set the following environment variables in `credentials.env` or your hosting secrets to enable encrypted per-server ZIP backups:
+Set the following environment variables in `credentials.env` or your bot hosting service's secret/environment settings to enable encrypted per-server ZIP backups:
 
 ```dotenv
 BACKUP_DISCORD_USER_ID=your_numeric_discord_user_id
