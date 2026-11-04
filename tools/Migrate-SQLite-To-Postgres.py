@@ -18,6 +18,7 @@ if str(SOURCE_ROOT) not in sys.path:
 
 from bloxfruits_helper_credit_bot.database import DatabaseManager  # noqa: E402
 from bloxfruits_helper_credit_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES, LoadRuntimeSettings  # noqa: E402
+from bloxfruits_helper_credit_bot.ticket_messages import DEFAULT_TICKET_WELCOME_MESSAGE  # noqa: E402
 
 TABLES = (
     "users",
@@ -106,6 +107,7 @@ def assert_target_is_fresh(database) -> None:
         "dashboard_channel_id": "",
         "dashboard_message_id": "",
         "audit_log_channel_id": "",
+        "ticket_welcome_message": DEFAULT_TICKET_WELCOME_MESSAGE,
     }
     if settings != expected_settings:
         raise RuntimeError(
