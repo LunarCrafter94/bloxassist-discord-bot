@@ -78,6 +78,11 @@ def AppCommandErrorMessage(commandName: str, error: Exception) -> str:
                 "currently in this server. To look up a former member, use the user_id "
                 "option and enter their numeric Discord User ID."
             )
+        if commandName == "ticket-history":
+            return (
+                "I couldn't resolve the selected member for `/ticket-history`. "
+                "Select a member who is currently in this server and try again."
+            )
         return "I couldn't understand one of the command options. Check the selected value and try again."
     if isinstance(error, app_commands.CheckFailure):
         return "You are not allowed to use this command here. Check the command's permission requirements."
