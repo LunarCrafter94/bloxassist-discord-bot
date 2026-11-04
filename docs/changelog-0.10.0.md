@@ -39,6 +39,11 @@
 - Added page navigation and optional category filtering to `/reports`.
 - Database report queries now support bounded limits, offsets, status filters, and category filters.
 
+## PostgreSQL migration safety
+
+- Updated the SQLite-to-PostgreSQL migration utility to include the v0.10.0 `transaction_audit_deliveries`, `credit_debts`, and `invite_attributions` tables. Fresh-target checks and deletion ordering cover these tables as well.
+- Added `tests/test_postgres_migration_coverage.py` to prevent application-table coverage from drifting behind the current schema.
+
 ## Tests added
 
 - `tests/test_debt_repayment.py`: partial/full repayment, invalid amounts, no debt, insufficient credits, overpayment, idempotency conflicts, ledger entries, credit-history pagination, automatic ticket-reward debt offsets for an already-indebted helper, and continued requester-debt reservation blocking.
