@@ -316,7 +316,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 debtRepaid = max(0, previousDebt - remainingDebt)
                 rewardDescription = f"<@{usedInvite.inviter.id}> earned **{reward:,} credits** for inviting <@{member.id}>."
                 if debtRepaid:
-                    rewardDescription += f"\\n**{debtRepaid:,} credits** were automatically applied to outstanding debt."
+                    rewardDescription += f"\n**{debtRepaid:,} credits** were automatically applied to outstanding debt."
                 rewardEmbed = discord.Embed(
                     title="🎟️ Invite reward awarded",
                     description=rewardDescription,
@@ -330,7 +330,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 try:
                     dmText = f"🎟️ You earned **{reward:,} credits** in **{member.guild.name}** for inviting a new member during invite event #{int(event['event_id'])}."
                     if debtRepaid:
-                        dmText += f"\\n**{debtRepaid:,} credits** automatically repaid your outstanding debt. Remaining debt: **{remainingDebt:,} credits**."
+                        dmText += f"\n**{debtRepaid:,} credits** automatically repaid your outstanding debt. Remaining debt: **{remainingDebt:,} credits**."
                     await usedInvite.inviter.send(dmText)
                 except discord.HTTPException:
                     logger.info("Could not DM inviter %s about reward in guild %s", usedInvite.inviter.id, member.guild.id)
