@@ -42,6 +42,7 @@
 ## PostgreSQL migration safety
 
 - Updated the SQLite-to-PostgreSQL migration utility to include the v0.10.0 `transaction_audit_deliveries`, `credit_debts`, and `invite_attributions` tables. Fresh-target checks and deletion ordering cover these tables as well.
+- Corrected the PostgreSQL migration fresh-target check to recognize the current seeded `ticket_welcome_message` setting, avoiding a false customized-settings rejection on a newly initialized schema.
 - Added `tests/test_postgres_migration_coverage.py` to prevent application-table coverage from drifting behind the current schema.
 
 ## Tests added
