@@ -189,6 +189,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                                 color=discord.Color.orange(), timestamp=discord.utils.utcnow(),
                             )
                             await SendAuditLog(guild, guildDatabase, eventEmbed)
+                            await RefreshDashboardMessage(guild, guildDatabase, databaseManager)
                         expiredTickets = guildDatabase.ExpireStaleResolutionRequests(15)
                         for ticketId, channelId, resolutionType, resolutionMessageId in expiredTickets:
                             channel = guild.get_channel(channelId) if channelId else None
@@ -541,7 +542,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         memberLabel = (
             f"{targetMember.mention} ({targetUserId})"
             if targetMember is not None
-            else f"User ID {targetUserId} (not currently in this server)"
+            else f"User ID {targetUserId} (ID lookup)"
         )
         embed = discord.Embed(title="💰 Member credit account", color=discord.Color.blurple())
         embed.add_field(name="Member", value=memberLabel, inline=False)
