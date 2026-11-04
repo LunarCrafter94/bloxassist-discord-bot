@@ -12,10 +12,27 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 
-from bloxfruits_helper_credit_bot.interaction_utils import EditEphemeralOriginalResponse
+from bloxfruits_helper_credit_bot.interaction_utils import (
+    EditEphemeralOriginalResponse,
+    SendEphemeralResponse,
+)
 
 
 class InteractionResponseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_none_view_is_omitted_from_send_message(self):
+        interaction = Mock()
+        interaction.id = 123456788
+        interaction.response.send_message = AsyncMock()
+
+        with patch(
+            "bloxfruits_helper_credit_bot.interaction_utils.ScheduleEphemeralOriginalDeletion"
+        ):
+            await SendEphemeralResponse(interaction, "No pagination needed.", view=None)
+
+        interaction.response.send_message.assert_awaited_once()
+        self.assertNotIn("view", interaction.response.send_message.await_args.kwargs)
+        self.assertTrue(interaction.response.send_message.await_args.kwargs["ephemeral"])
+
     async def test_missing_auto_deleted_ephemeral_response_is_non_fatal(self):
         response = Mock()
         response.status = 404
