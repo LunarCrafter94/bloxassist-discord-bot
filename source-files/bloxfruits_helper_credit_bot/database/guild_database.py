@@ -246,6 +246,8 @@ class GuildDatabase:
                 inviter_user_id INTEGER NOT NULL,
                 invite_code TEXT NOT NULL DEFAULT '',
                 penalty_applied INTEGER NOT NULL DEFAULT 0 CHECK (penalty_applied IN (0, 1)),
+                join_cycle INTEGER NOT NULL DEFAULT 1,
+                joined_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """,
@@ -283,6 +285,25 @@ class GuildDatabase:
                 self.connection.execute(
                     "ALTER TABLE scam_reports ADD COLUMN report_type TEXT NOT NULL DEFAULT 'scam'"
                 )
+
+            # Track attributed invite join cycles so optional repeat leave penalties
+            # can re-arm once per distinct Discord join timestamp.
+            if self.backend == "sqlite":
+                attributionColumnRows = self.connection.execute("PRAGMA table_info(invite_attributions)").fetchall()
+                attributionColumns = {str(row["name"]) for row in attributionColumnRows}
+            else:
+                attributionColumnRows = self.connection.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?",
+                    ("invite_attributions",),
+                ).fetchall()
+                attributionColumns = {str(row["column_name"]) for row in attributionColumnRows}
+            attributionMigrations = {
+                "join_cycle": "ALTER TABLE invite_attributions ADD COLUMN join_cycle INTEGER NOT NULL DEFAULT 1",
+                "joined_at": "ALTER TABLE invite_attributions ADD COLUMN joined_at TEXT NOT NULL DEFAULT ''",
+            }
+            for columnName, migrationSql in attributionMigrations.items():
+                if columnName not in attributionColumns:
+                    self.connection.execute(migrationSql)
 
             # Add the numbered-ticket column to databases created before this feature.
             if self.backend == "sqlite":
@@ -471,6 +492,7 @@ class GuildDatabase:
                 "dashboard_message_id": "",
                 "audit_log_channel_id": "",
                 "ticket_welcome_message": DEFAULT_TICKET_WELCOME_MESSAGE,
+                "invite_leave_penalty_repeat_on_rejoin": "false",
             }
             for settingKey, settingValue in settingDefaults.items():
                 self.connection.execute(
@@ -628,20 +650,55 @@ class GuildDatabase:
                 self.connection.rollback()
                 raise
 
-    def RecordInviteAttribution(self, invitedUserId: int, inviterUserId: int, inviteCode: str) -> bool:
-        """Remember who invited a member, independently of whether an invite event is active."""
+    def RecordInviteAttribution(
+        self,
+        invitedUserId: int,
+        inviterUserId: int,
+        inviteCode: str,
+        *,
+        repeatOnRejoin: bool = False,
+        joinedAt: str | None = None,
+    ) -> bool:
+        """Remember the inviter and, optionally, re-arm one penalty per distinct join cycle.
+
+        The Discord member's joined_at timestamp identifies a join cycle. Repeated
+        delivery of the same join event therefore cannot re-arm an already-used
+        penalty. The default mode preserves the historical one-penalty-per-member
+        behavior for existing servers.
+        """
         invitedId, inviterId = int(invitedUserId), int(inviterUserId)
         if invitedId <= 0 or inviterId <= 0 or invitedId == inviterId:
             return False
+        joinedAtText = str(joinedAt or "").strip()[:80]
         with self.databaseLock:
             try:
+                self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
                 cursor = self.connection.execute(
-                    """INSERT INTO invite_attributions(invited_user_id, inviter_user_id, invite_code)
-                       VALUES (?, ?, ?) ON CONFLICT(invited_user_id) DO NOTHING""",
-                    (invitedId, inviterId, str(inviteCode)[:100]),
+                    """INSERT INTO invite_attributions
+                       (invited_user_id, inviter_user_id, invite_code, join_cycle, joined_at)
+                       VALUES (?, ?, ?, 1, ?)
+                       ON CONFLICT(invited_user_id) DO NOTHING""",
+                    (invitedId, inviterId, str(inviteCode)[:100], joinedAtText),
                 )
+                inserted = cursor.rowcount == 1
+
+                if repeatOnRejoin:
+                    lockSql = "SELECT join_cycle, joined_at FROM invite_attributions WHERE invited_user_id = ?"
+                    if self.backend == "postgresql":
+                        lockSql += " FOR UPDATE"
+                    current = self.connection.execute(lockSql, (invitedId,)).fetchone()
+                    if current is not None and str(current["joined_at"] or "") != joinedAtText:
+                        self.connection.execute(
+                            """UPDATE invite_attributions
+                               SET inviter_user_id = ?, invite_code = ?, penalty_applied = 0,
+                                   join_cycle = join_cycle + 1, joined_at = ?
+                               WHERE invited_user_id = ?""",
+                            (inviterId, str(inviteCode)[:100], joinedAtText, invitedId),
+                        )
+                        inserted = True
+
                 self.connection.commit()
-                return cursor.rowcount == 1
+                return inserted
             except Exception:
                 self.connection.rollback()
                 raise
@@ -652,13 +709,20 @@ class GuildDatabase:
             (int(invitedUserId),), fetchOne=True,
         )
 
-    def MarkInviteLeavePenaltyApplied(self, invitedUserId: int) -> bool:
+    def MarkInviteLeavePenaltyApplied(self, invitedUserId: int, joinCycle: int | None = None) -> bool:
         with self.databaseLock:
             try:
-                cursor = self.connection.execute(
-                    "UPDATE invite_attributions SET penalty_applied = 1 WHERE invited_user_id = ? AND penalty_applied = 0",
-                    (int(invitedUserId),),
-                )
+                if joinCycle is None:
+                    cursor = self.connection.execute(
+                        "UPDATE invite_attributions SET penalty_applied = 1 WHERE invited_user_id = ? AND penalty_applied = 0",
+                        (int(invitedUserId),),
+                    )
+                else:
+                    cursor = self.connection.execute(
+                        "UPDATE invite_attributions SET penalty_applied = 1 "
+                        "WHERE invited_user_id = ? AND join_cycle = ? AND penalty_applied = 0",
+                        (int(invitedUserId), int(joinCycle)),
+                    )
                 self.connection.commit()
                 return cursor.rowcount == 1
             except Exception:
