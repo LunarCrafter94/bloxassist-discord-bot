@@ -16,6 +16,7 @@ from .admin.dashboard_views import (
     RestoreSavedDashboardMessage,
 )
 from .credits.credit_service import CreditService
+from .credits.credit_history_view import CreditHistoryView
 from .audit import ResolveAuditChannel, SendAuditLog
 from .invites.invite_events import FetchInviteUseCounts, FindUsedInvite, FormatInviteEventCountdown
 from .backups import PerServerBackupService
@@ -599,7 +600,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
     @app_commands.describe(
         member="Optional current member (staff access required to view another member)",
         user_id="Numeric Discord User ID; works for former members",
-        page="History page, 10 transactions per page",
+        page="History page, 10 transactions per page (buttons also available)",
     )
     async def CreditHistory(
         interaction: discord.Interaction,
@@ -620,33 +621,30 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         if targetUserId != interaction.user.id and not HasConfiguredStaffAccess(interaction, databaseManager):
             await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can view another member's credit history.", ephemeral=True)
             return
+
         db = databaseManager.ForServer(interaction.guild_id)
         targetMember = member or interaction.guild.get_member(targetUserId)
         targetLabel = str(targetMember) if targetMember is not None else f"User ID {targetUserId}"
-        rows = db.ListCreditTransactions(targetUserId, limit=10, offset=(int(page) - 1) * 10)
-        embed = discord.Embed(title=f"📜 Credit history · {targetLabel}", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
-        embed.description = f"Member ID: {targetUserId}\nShowing page {int(page)} · 10 transactions per page. Newest first."
-        if not rows:
-            embed.description += "\nNo credit transactions were found on this page."
-        else:
-            for row in rows:
-                transactionType = str(row["type"]).replace("_", " ").title()
-                amountText = f"{int(row['amount']):,} credits"
-                if row["type"] == "debt_repayment":
-                    amountText = f"−{amountText} (debt repayment)"
-                elif row["type"] == "penalty_debt":
-                    amountText = f"−{amountText} (penalty)"
-                elif row["to_user"] == targetUserId:
-                    amountText = f"+{amountText}"
-                elif row["from_user"] == targetUserId:
-                    amountText = f"−{amountText}"
-                note = str(row["note"] or "No note")[:180]
-                embed.add_field(
-                    name=f"#{int(row['id'])} · {transactionType} · {amountText}",
-                    value=f"{row['created_at']}\n{note}",
-                    inline=False,
-                )
-        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
+        view = CreditHistoryView(
+            db,
+            targetUserId=targetUserId,
+            targetLabel=targetLabel,
+            requesterUserId=interaction.user.id,
+            guildId=interaction.guild_id,
+            page=int(page),
+            originInteraction=interaction,
+            staffAccessCheck=lambda buttonInteraction: HasConfiguredStaffAccess(
+                buttonInteraction, databaseManager
+            ),
+        )
+        await SendEphemeralResponse(
+            interaction,
+            embed=view.embed,
+            view=view if view.has_navigation else None,
+            ephemeral=True,
+        )
+        if not view.has_navigation:
+            view.stop()
 
     @bot.tree.command(name="diagnostics", description="Server owner only: check bot and credit database configuration.")
     @app_commands.guild_only()
