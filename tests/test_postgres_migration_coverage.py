@@ -60,6 +60,11 @@ class PostgresMigrationCoverageTests(unittest.TestCase):
             source,
         )
 
+    def test_fresh_target_check_includes_ticket_allocator_defaults(self):
+        source = MIGRATION_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('"next_ticket_channel_number": "1"', source)
+        self.assertIn('"next_ticket_sequence": "1"', source)
+
     def test_insert_and_delete_orders_respect_foreign_keys(self):
         tables = read_module_constant("TABLES")
         delete_order = read_module_constant("DELETE_ORDER")
