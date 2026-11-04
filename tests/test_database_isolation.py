@@ -340,6 +340,19 @@ class PerGuildDatabaseTests(unittest.TestCase):
         self.assertEqual((status, balance, debt), ("penalized", 0, 25))
         self.assertFalse(self.guildA.connection.in_transaction)
 
+    def testLegacyInviteAttributionWithoutJoinTimestampRemainsEligible(self):
+        invitedId, inviterId = 22115, 22116
+        self.guildA.Execute(
+            "INSERT INTO invite_attributions(invited_user_id, inviter_user_id, invite_code) VALUES (?, ?, ?)",
+            (invitedId, inviterId, "legacy-code"),
+        )
+        attribution = self.guildA.GetInviteAttribution(
+            invitedId, joinedAt="2026-11-04T12:00:00+00:00"
+        )
+        self.assertIsNotNone(attribution)
+        self.assertEqual(int(attribution["join_cycle"]), 1)
+        self.assertEqual(str(attribution["joined_at"]), "")
+
     def testInviteLeavePenaltyCanRepeatOncePerDistinctRejoinCycle(self):
         invitedId, inviterId = 22121, 22122
         self.guildA.CreateUser(inviterId, credits=0)
