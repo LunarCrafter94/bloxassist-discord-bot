@@ -110,6 +110,7 @@ def assert_target_is_fresh(database) -> None:
         "ticket_welcome_message": DEFAULT_TICKET_WELCOME_MESSAGE,
         "next_ticket_channel_number": "1",
         "next_ticket_sequence": "1",
+        "invite_leave_penalty_repeat_on_rejoin": "false",
     }
     if settings != expected_settings:
         raise RuntimeError(
