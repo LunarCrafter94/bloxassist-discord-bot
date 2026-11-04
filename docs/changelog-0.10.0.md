@@ -28,7 +28,7 @@
 
 ## Credit history
 
-- Added `/credit-history` with 10 entries per page, newest first.
+- Added `/credit-history` with 10 entries per page, newest first, and private Previous/Next buttons. The existing `page` option remains available for direct page jumps. Pagination is bound to the command invoker, and staff access to another member's history is rechecked before each page is shown.
 - Members can view their own history. Viewing another member's history requires Administrator or configured moderator access.
 - Reuses the existing transaction ledger; no parallel history table is introduced.
 
