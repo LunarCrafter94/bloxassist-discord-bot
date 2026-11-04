@@ -445,6 +445,11 @@ class ReportScamModal(discord.ui.Modal, title="Submit a Report"):
             )
 
 
+async def _DeleteTranscriptMessage(message: discord.Message) -> None:
+    """Delete a saved transcript post using the supported Message.delete API."""
+    await message.delete()
+
+
 async def PublishTicketTranscript(
     channel: discord.TextChannel, databaseManager: DatabaseManager, ticketId: int, finalStatus: str, actorUserId: int | None = None
 ) -> bool:
@@ -589,7 +594,7 @@ async def PublishTicketTranscript(
                     break
                 _, oldestTicketId, oldestMessage = retainedMessages.pop(oldestIndex)
                 try:
-                    await oldestMessage.delete(reason="Keep only the 100 most recent ticket transcripts")
+                    await _DeleteTranscriptMessage(oldestMessage)
                     db.ClearTicketTranscriptMessage(oldestTicketId)
                 except discord.HTTPException:
                     retentionSafe = False
