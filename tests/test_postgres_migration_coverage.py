@@ -48,6 +48,18 @@ class PostgresMigrationCoverageTests(unittest.TestCase):
         core_tables = read_module_constant("CORE_TABLES")
         self.assertEqual(set(core_tables), EXPECTED_CORE_TABLES)
 
+
+    def test_fresh_target_check_includes_ticket_welcome_default(self):
+        source = MIGRATION_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn(
+            '"ticket_welcome_message": DEFAULT_TICKET_WELCOME_MESSAGE',
+            source,
+        )
+        self.assertIn(
+            "from bloxfruits_helper_credit_bot.ticket_messages import DEFAULT_TICKET_WELCOME_MESSAGE",
+            source,
+        )
+
     def test_insert_and_delete_orders_respect_foreign_keys(self):
         tables = read_module_constant("TABLES")
         delete_order = read_module_constant("DELETE_ORDER")
