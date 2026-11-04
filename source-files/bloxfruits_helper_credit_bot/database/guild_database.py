@@ -682,12 +682,12 @@ class GuildDatabase:
                 )
                 inserted = cursor.rowcount == 1
 
-                if repeatOnRejoin:
-                    lockSql = "SELECT join_cycle, joined_at FROM invite_attributions WHERE invited_user_id = ?"
-                    if self.backend == "postgresql":
-                        lockSql += " FOR UPDATE"
-                    current = self.connection.execute(lockSql, (invitedId,)).fetchone()
-                    if current is not None and str(current["joined_at"] or "") != joinedAtText:
+                lockSql = "SELECT join_cycle, joined_at FROM invite_attributions WHERE invited_user_id = ?"
+                if self.backend == "postgresql":
+                    lockSql += " FOR UPDATE"
+                current = self.connection.execute(lockSql, (invitedId,)).fetchone()
+                if current is not None and str(current["joined_at"] or "") != joinedAtText:
+                    if repeatOnRejoin:
                         self.connection.execute(
                             """UPDATE invite_attributions
                                SET inviter_user_id = ?, invite_code = ?, penalty_applied = 0,
@@ -696,6 +696,13 @@ class GuildDatabase:
                             (inviterId, str(inviteCode)[:100], joinedAtText, invitedId),
                         )
                         inserted = True
+                    else:
+                        # Even in once-per-member mode, track the current join timestamp
+                        # without resetting penalty_applied or changing the original inviter.
+                        self.connection.execute(
+                            "UPDATE invite_attributions SET joined_at = ? WHERE invited_user_id = ?",
+                            (joinedAtText, invitedId),
+                        )
 
                 self.connection.commit()
                 return inserted
