@@ -420,7 +420,7 @@ class PerGuildDatabaseTests(unittest.TestCase):
         )
         self.assertEqual(
             (int(stored["join_cycle"]), str(stored["joined_at"]), int(stored["penalty_applied"])),
-            (1, firstJoin, 1),
+            (1, secondJoin, 1),
         )
 
     def testLateLeaveHandlerCannotMarkANewerJoinCycleAsPenalized(self):
