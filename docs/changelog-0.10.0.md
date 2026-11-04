@@ -21,6 +21,7 @@
 - Treat an already auto-deleted ephemeral completion response as non-fatal, so a slow transcript-retention pass cannot make a completed ticket appear to have failed.
 - Committed successful invite-attribution inserts and leave-penalty attribution updates before later explicit SQLite transactions begin, preventing nested-transaction failures on the shared per-server connection.
 - Corrected invite reward audit-embed and inviter-DM line breaks so automatic debt-offset details render on separate lines.
+- Added an owner-configurable Admin Dashboard option for inviter leave penalties: one penalty per invited member (default) or one penalty for each distinct attributed rejoin/leave cycle. Cycle tracking uses the Discord member join timestamp, stores a per-member cycle counter, and derives a unique idempotency key per cycle so duplicate events cannot charge twice. Existing SQLite and PostgreSQL databases add the new attribution columns automatically.
 
 ## Credit history
 
@@ -51,7 +52,9 @@
 - `tests/test_debt_repayment.py`: partial/full repayment, invalid amounts, no debt, insufficient credits, overpayment, idempotency conflicts, ledger entries, credit-history pagination, automatic ticket-reward debt offsets for an already-indebted helper, and continued requester-debt reservation blocking.
 - `tests/test_report_pagination.py`: non-overlapping pages, category filtering, and all-category pagination.
 - `tests/test_credit_privacy.py`: self, owner, Administrator, configured moderator, ordinary member, Manage Server-only, and non-guild debt-visibility boundaries; verifies `/credits` only queries and displays debt after authorization.
-- `tests/test_database_isolation.py`: verifies invite-attribution writes are committed before invite reward and penalty transactions begin.
+- `tests/test_database_isolation.py`: verifies invite-attribution commit boundaries, repeat penalties across distinct rejoin cycles, duplicate join/leave protection, stale-cycle handling, and migration of legacy attribution tables.
+- `tests/test_phase3_configuration.py`: verifies the repeat-per-rejoin setting is disabled by default and isolated per server.
+- `tests/test_postgres_migration_coverage.py`: verifies the new repeat-per-rejoin setting is recognized by PostgreSQL migration preflight.
 - `tests/test_setup_commands.py`: verifies invite reward embeds and DMs use real line breaks.
 - `tests/test_transcript_message_deletion.py`: verifies transcript-retention message deletion uses the supported Discord API call.
 - `tests/test_interaction_utils.py`: verifies an already-removed ephemeral original response is non-fatal.
@@ -72,15 +75,15 @@
 - Live PostgreSQL member-initiated debt repayment QA passed: after Hollow Saviour incurred 50 credits of debt, an additional 100-credit owner adjustment gave sufficient available funds; `/repay-debt` repaid the full 50-credit debt and left 50 available credits. The debt-repayment notification confirmed zero remaining debt. This verifies full repayment on PostgreSQL; a distinct partial repayment that leaves some debt outstanding remains to be tested.
 
 - The automated DM backup warning appeared because backup recipient/password settings were not configured; this did not prevent startup or PostgreSQL operation. Backup delivery/restore has not yet been live-verified against PostgreSQL.
-- The 119-test unit suite passed before migration. These tests supplement, but do not replace, live verification of the complete PostgreSQL ticket and invite workflows.
+- The 119-test unit suite passed before the configurable repeat-per-rejoin policy was added. Six additional regression tests now cover the setting, join-cycle idempotency, legacy schema upgrade, and PostgreSQL migration defaults; the updated suite is expected to contain 125 tests and still needs to be run locally. The newly added per-join-cycle behavior also needs live PostgreSQL verification after the bot is restarted and the schema upgrade runs.
 
 ## QA status — November 4, 2026
 
-- Pulled the latest `development/v0.10.0` branch and ran the full suite: **114 tests passed in 14.295 seconds** (`OK`). This includes the regression tests proving that an already-indebted helper can be reserved and that a requester with debt remains blocked.
+- Pulled `development/v0.10.0` and ran the full suite before the repeat-per-rejoin change: **119 tests passed in 11.503 seconds** (`OK`). This includes the regression tests proving that an already-indebted helper can be reserved and that a requester with debt remains blocked.
 - Live Discord QA confirmed setup/dashboard initialization, public Help Center setup, SQLite/core-table/audit-channel diagnostics, balance and credit-history lookup, owner and Administrator `/credits` debt visibility, ordinary-member suppression of another member's debt field, manual `/penalty`, credit additions, partial/full debt repayment and overpayment rejection, invite event start/end, invite rewards with automatic debt offset, inviter leave penalties, and ticket creation/helper selection/completion/refunds.
 - The non-staff `/credits` privacy path was verified live with a target member who had non-zero outstanding debt: an ordinary member without authorized roles could see the target's available credits but was not shown the debt field.
 - Live Discord QA confirmed automatic ticket-reward debt offset on ticket #105: CZareth Playz received a 100-credit gross reward, 50 credits were applied to outstanding debt, and the final state was 50 available credits with zero remaining debt. On ticket #106, CZareth already had 50 debt and zero available credits **before reservation**; Hollow Saviour successfully reserved 100 credits and CZareth was assigned as the helper. After completion and participant approvals, ledger transaction #448 recorded the 50-credit automatic debt repayment and transaction #449 recorded the separate 100-credit gross ticket reward. The subsequent `/balance` check confirmed 50 available credits and zero debt. This verifies the previously failing indebted-helper assignment flow end to end.
 - Ticket #106's persistent database/transcript/ledger ID appeared in a Discord channel named `ticket-001`. The channel name is reused when no other tickets occupy that slot; this is expected channel naming, not an ID mismatch.
 - Live Discord QA verified non-empty `/reports` pagination with six reports: page 1 returned five reports (#6–#2), page 2 returned the remaining report (#1), and the Bug / Bot Issue category filter returned only reports #2 and #1.
 - Full transcript delivery, direct history links, and 100-message rolling transcript retention passed live QA.
-- Validate PostgreSQL behavior against a real PostgreSQL instance, not only the adapter unit tests.
+- PostgreSQL live integration has since been exercised on local PostgreSQL 18.6: migration/content comparison, startup, diagnostics, balance/history reads, credit adjustments, ticket completion/refund flows, invite attribution/rewards, inviter leave penalties, automatic invite debt offsets, and full manual debt repayment passed. The new configurable repeat-per-rejoin behavior remains pending live verification.
