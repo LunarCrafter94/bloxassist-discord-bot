@@ -703,10 +703,20 @@ class GuildDatabase:
                 self.connection.rollback()
                 raise
 
-    def GetInviteAttribution(self, invitedUserId: int):
+    def GetInviteAttribution(self, invitedUserId: int, *, joinedAt: str | None = None):
+        if joinedAt is None:
+            return self.Execute(
+                "SELECT * FROM invite_attributions WHERE invited_user_id = ? AND penalty_applied = 0",
+                (int(invitedUserId),), fetchOne=True,
+            )
+        # Empty timestamps belong to legacy rows created before join-cycle tracking.
+        # They remain eligible for their one outstanding legacy penalty. A timestamped
+        # row must match the member object from this exact Discord leave event, so a
+        # delayed old leave event cannot penalize a newer rejoin cycle.
         return self.Execute(
-            "SELECT * FROM invite_attributions WHERE invited_user_id = ? AND penalty_applied = 0",
-            (int(invitedUserId),), fetchOne=True,
+            "SELECT * FROM invite_attributions "
+            "WHERE invited_user_id = ? AND penalty_applied = 0 AND (joined_at = ? OR joined_at = '')",
+            (int(invitedUserId), str(joinedAt)[:80]), fetchOne=True,
         )
 
     def MarkInviteLeavePenaltyApplied(self, invitedUserId: int, joinCycle: int | None = None) -> bool:
