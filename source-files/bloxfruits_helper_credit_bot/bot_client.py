@@ -21,6 +21,7 @@ from .audit import ResolveAuditChannel, SendAuditLog
 from .invites.invite_events import FetchInviteUseCounts, FindUsedInvite, FormatInviteEventCountdown
 from .backups import PerServerBackupService
 from .interaction_utils import DeferEphemeralResponse, EditEphemeralOriginalResponse, SendEphemeralFollowup, SendEphemeralResponse
+from .pagination import EphemeralPaginator
 from .database import DatabaseManager
 from .settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES, RuntimeSettings
 from .ticket_numbers import TicketLabelFromRow
@@ -1068,39 +1069,93 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
 
     @bot.tree.command(name="ticket-history", description="Staff only: review a member's retained ticket history.")
     @app_commands.guild_only()
-    @app_commands.describe(member="The member whose tickets you want to review", limit="Number of recent tickets to show (1–10)")
-    async def TicketHistory(interaction: discord.Interaction, member: discord.Member, limit: app_commands.Range[int, 1, 10] = 10) -> None:
+    @app_commands.describe(
+        member="The member whose tickets you want to review",
+        limit="Tickets per page (1–10)",
+        page="History page (buttons also available)",
+    )
+    async def TicketHistory(
+        interaction: discord.Interaction,
+        member: discord.Member,
+        limit: app_commands.Range[int, 1, 10] = 10,
+        page: app_commands.Range[int, 1, 1000] = 1,
+    ) -> None:
         if interaction.guild is None or interaction.guild_id is None:
             await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
             return
-        db = databaseManager.ForServer(interaction.guild_id)
         if not HasConfiguredStaffAccess(interaction, databaseManager):
             await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can view ticket history.", ephemeral=True)
             return
-        rows = db.ListTicketHistoryForMember(member.id, int(limit))
-        embed = discord.Embed(title=f"📚 Ticket history · {member}", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
-        embed.description = f"Member ID: `{member.id}`\nShowing {len(rows)} most recent matching ticket(s). The database retains ticket/transaction metadata even after the ticket channel is deleted."
-        for row in rows[:10]:
-            ticketNumber = int(row["ticket_number"] or 0)
-            ticketLabel = TicketLabelFromRow(row)
-            helpers = db._ParseIdCsv(str(row["helper_ids"] or ""))
-            value = (f"Status: **{row['status']}** · Event key: `{row['event_key']}`\n"
-                     f"Requester: <@{int(row['creator_id'])}> · Helpers: " + (", ".join(f"<@{x}>" for x in helpers) or "none") +
-                     f"\nReserved: {int(row['reserved_credits']):,} credits · Created: {row['created_at']}")
-            transcriptChannelId = row["transcript_channel_id"] if "transcript_channel_id" in row.keys() else None
-            transcriptMessageId = row["transcript_message_id"] if "transcript_message_id" in row.keys() else None
-            if transcriptChannelId and transcriptMessageId:
-                value += f"\n[Open transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
-            else:
-                value += "\nTranscript link: unavailable (no successfully saved transcript was recorded)."
-            embed.add_field(name=f"Ticket #{ticketLabel} · Database ID {int(row['ticket_id'])}", value=value[:1024], inline=False)
-        if not rows:
-            embed.description += "\nNo retained ticket records matched this member."
-        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
+
+        db = databaseManager.ForServer(interaction.guild_id)
+        pageSize = int(limit)
+
+        def LoadTicketHistoryPage(pageNumber: int) -> tuple[discord.Embed, bool]:
+            rows = db.ListTicketHistoryForMember(
+                member.id,
+                pageSize + 1,
+                offset=(pageNumber - 1) * pageSize,
+            )
+            visibleRows = rows[:pageSize]
+            embed = discord.Embed(
+                title=f"📚 Ticket history · {member}",
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.description = (
+                f"Member ID: \`{member.id}\`\n"
+                f"Showing page {pageNumber} · {pageSize} ticket(s) per page. "
+                "The database retains ticket/transaction metadata even after the ticket channel is deleted."
+            )
+            for row in visibleRows:
+                ticketLabel = TicketLabelFromRow(row)
+                helpers = db._ParseIdCsv(str(row["helper_ids"] or ""))
+                value = (
+                    f"Status: **{row['status']}** · Event key: \`{row['event_key']}\`\n"
+                    f"Requester: <@{int(row['creator_id'])}> · Helpers: "
+                    + (", ".join(f"<@{x}>" for x in helpers) or "none")
+                    + f"\nReserved: {int(row['reserved_credits']):,} credits · Created: {row['created_at']}"
+                )
+                transcriptChannelId = row["transcript_channel_id"] if "transcript_channel_id" in row.keys() else None
+                transcriptMessageId = row["transcript_message_id"] if "transcript_message_id" in row.keys() else None
+                if transcriptChannelId and transcriptMessageId:
+                    value += f"\n[Open transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
+                else:
+                    value += "\nTranscript link: unavailable (no successfully saved transcript was recorded)."
+                embed.add_field(
+                    name=f"Ticket #{ticketLabel} · Database ID {int(row['ticket_id'])}",
+                    value=value[:1024],
+                    inline=False,
+                )
+            if not visibleRows:
+                embed.description += "\nNo retained ticket records matched this member on this page."
+            return embed, len(rows) > pageSize
+
+        view = EphemeralPaginator(
+            LoadTicketHistoryPage,
+            page=int(page),
+            requesterUserId=interaction.user.id,
+            guildId=interaction.guild_id,
+            originInteraction=interaction,
+            accessCheck=lambda buttonInteraction: HasConfiguredStaffAccess(
+                buttonInteraction, databaseManager
+            ),
+        )
+        await SendEphemeralResponse(
+            interaction,
+            embed=view.embed,
+            view=view if view.has_navigation else None,
+            ephemeral=True,
+        )
+        if not view.has_navigation:
+            view.stop()
 
     @bot.tree.command(name="reports", description="Staff only: browse open reports by category and page.")
     @app_commands.guild_only()
-    @app_commands.describe(page="Page number (5 reports per page)", category="Optional report category filter")
+    @app_commands.describe(
+        page="Page number (5 reports per page; buttons also available)",
+        category="Optional report category filter",
+    )
     @app_commands.choices(category=[
         app_commands.Choice(name="All categories", value="all"),
         app_commands.Choice(name="Scam / Fraud", value="scam"),
@@ -1120,58 +1175,93 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         if not HasConfiguredStaffAccess(interaction, databaseManager):
             await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can review reports.", ephemeral=True)
             return
+
         db = databaseManager.ForServer(interaction.guild_id)
-        rows = db.ListScamReports(status="open", limit=5, reportType=category.value if category else None, offset=(int(page) - 1) * 5)
+        categoryValue = category.value if category else None
         categoryText = category.name if category else "All categories"
-        embed = discord.Embed(title=f"📨 Open reports · {categoryText}", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
-        embed.set_footer(text=f"Page {int(page)} · 5 reports per page · Use /reports page:<number> to navigate")
-        if not rows:
-            embed.description = "No open reports were found on this page for the selected category."
-        else:
-            embed.description = "Use `/report-review` to confirm or dismiss a report after reviewing the available evidence."
-            categoryLabels = {
-                "scam": "Scam / Fraud",
-                "bug": "Bug / Bot Issue",
-                "ticket_credit": "Ticket / Credit Issue",
-                "member_behavior": "Member Misconduct",
-                "other": "Other / General Issue",
-            }
-            for row in rows[:10]:
-                reportedUserId = int(row["reported_user_id"] or 0)
-                reportType = str(row["report_type"] if "report_type" in row.keys() else "scam")
-                categoryLabel = categoryLabels.get(reportType, "Other / General Issue")
-                relatedTickets = db.ListTicketHistoryForMember(reportedUserId, limit=2) if reportedUserId > 0 else []
-                relatedLinks = []
-                for ticketRow in relatedTickets:
-                    ticketLabel = TicketLabelFromRow(ticketRow)
-                    transcriptChannelId = ticketRow["transcript_channel_id"] if "transcript_channel_id" in ticketRow.keys() else None
-                    transcriptMessageId = ticketRow["transcript_message_id"] if "transcript_message_id" in ticketRow.keys() else None
-                    if transcriptChannelId and transcriptMessageId:
-                        relatedLinks.append(
-                            f"[ticket-{ticketLabel} transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
-                        )
-                    elif str(ticketRow["status"]) == "open" and ticketRow["channel_id"]:
-                        relatedLinks.append(
-                            f"[ticket-{ticketLabel} open channel](https://discord.com/channels/{interaction.guild_id}/{int(ticketRow['channel_id'])})"
-                        )
-                linksText = (
-                    "\n".join(relatedLinks) if relatedLinks
-                    else ("No member was attached to this report." if reportedUserId <= 0
-                          else "No transcript/open ticket links found for this member.")
-                )
-                memberText = f"<@{reportedUserId}> (`{reportedUserId}`)" if reportedUserId > 0 else "Not specified"
-                embed.add_field(
-                    name=f"Report #{int(row['report_id'])} · {str(row['created_at'])}",
-                    value=(
-                        f"**Category:** {categoryLabel}\n"
-                        f"**Reported member:** {memberText}\n"
-                        f"**Reporter:** <@{int(row['reporter_user_id'])}> (`{int(row['reporter_user_id'])}`)\n"
-                        f"**Details:** {str(row['details'])[:250]}\n"
-                        f"**Related history:** {linksText}"
-                    )[:1024],
-                    inline=False,
-                )
-        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
+
+        def LoadReportsPage(pageNumber: int) -> tuple[discord.Embed, bool]:
+            rows = db.ListScamReports(
+                status="open",
+                limit=6,
+                reportType=categoryValue,
+                offset=(pageNumber - 1) * 5,
+            )
+            visibleRows = rows[:5]
+            embed = discord.Embed(
+                title=f"📨 Open reports · {categoryText}",
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.set_footer(
+                text=f"Page {pageNumber} · 5 reports per page · Category: {categoryText}"
+            )
+            if not visibleRows:
+                embed.description = "No open reports were found on this page for the selected category."
+            else:
+                embed.description = "Use \`/report-review\` to confirm or dismiss a report after reviewing the available evidence."
+                categoryLabels = {
+                    "scam": "Scam / Fraud",
+                    "bug": "Bug / Bot Issue",
+                    "ticket_credit": "Ticket / Credit Issue",
+                    "member_behavior": "Member Misconduct",
+                    "other": "Other / General Issue",
+                }
+                for row in visibleRows:
+                    reportedUserId = int(row["reported_user_id"] or 0)
+                    reportType = str(row["report_type"] if "report_type" in row.keys() else "scam")
+                    categoryLabel = categoryLabels.get(reportType, "Other / General Issue")
+                    relatedTickets = db.ListTicketHistoryForMember(reportedUserId, limit=2) if reportedUserId > 0 else []
+                    relatedLinks = []
+                    for ticketRow in relatedTickets:
+                        ticketLabel = TicketLabelFromRow(ticketRow)
+                        transcriptChannelId = ticketRow["transcript_channel_id"] if "transcript_channel_id" in ticketRow.keys() else None
+                        transcriptMessageId = ticketRow["transcript_message_id"] if "transcript_message_id" in ticketRow.keys() else None
+                        if transcriptChannelId and transcriptMessageId:
+                            relatedLinks.append(
+                                f"[ticket-{ticketLabel} transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
+                            )
+                        elif str(ticketRow["status"]) == "open" and ticketRow["channel_id"]:
+                            relatedLinks.append(
+                                f"[ticket-{ticketLabel} open channel](https://discord.com/channels/{interaction.guild_id}/{int(ticketRow['channel_id'])})"
+                            )
+                    linksText = (
+                        "\n".join(relatedLinks) if relatedLinks
+                        else ("No member was attached to this report." if reportedUserId <= 0
+                              else "No transcript/open ticket links found for this member.")
+                    )
+                    memberText = f"<@{reportedUserId}> (\`{reportedUserId}\`)" if reportedUserId > 0 else "Not specified"
+                    embed.add_field(
+                        name=f"Report #{int(row['report_id'])} · {str(row['created_at'])}",
+                        value=(
+                            f"**Category:** {categoryLabel}\n"
+                            f"**Reported member:** {memberText}\n"
+                            f"**Reporter:** <@{int(row['reporter_user_id'])}> (\`{int(row['reporter_user_id'])}\`)\n"
+                            f"**Details:** {str(row['details'])[:250]}\n"
+                            f"**Related history:** {linksText}"
+                        )[:1024],
+                        inline=False,
+                    )
+            return embed, len(rows) > 5
+
+        view = EphemeralPaginator(
+            LoadReportsPage,
+            page=int(page),
+            requesterUserId=interaction.user.id,
+            guildId=interaction.guild_id,
+            originInteraction=interaction,
+            accessCheck=lambda buttonInteraction: HasConfiguredStaffAccess(
+                buttonInteraction, databaseManager
+            ),
+        )
+        await SendEphemeralResponse(
+            interaction,
+            embed=view.embed,
+            view=view if view.has_navigation else None,
+            ephemeral=True,
+        )
+        if not view.has_navigation:
+            view.stop()
 
     @bot.tree.command(name="report-review", description="Staff only: confirm or dismiss an open report.")
     @app_commands.guild_only()
