@@ -30,7 +30,7 @@ A PostgreSQL ZIP contains `database/database-export.json` and `manifest.json`. F
 .\.venv\Scripts\python.exe tools\Restore-Postgres-Server-Backup.py path\to\server-<ID>-backup.zip --server-id <ID>
 ```
 
-To apply, stop the bot and run the same command with `--apply`. The script requires typing the exact server ID because it replaces the eight application tables for that server. It checks the backup format/server ID, checks schema column compatibility, imports rows transactionally, resets serial sequences, and verifies row counts. Confirm balances, tickets, service settings, event history and ledger before starting the bot again.
+To apply, stop the bot and run the same command with `--apply`. The script requires typing the exact server ID because it replaces all 11 current v0.10.0 application tables for that server, including balances/debts, transactions, invite attributions, and audit-delivery markers. The dry run decrypts and validates the archive structure/table set without changing PostgreSQL. The apply step is destructive for that one server schema and restores the database exactly as it existed at the backup timestamp; data created after that timestamp will be lost from the restored schema. It checks the backup format/server ID, checks schema column compatibility, imports rows transactionally, resets serial sequences, and verifies row counts. Confirm balances, tickets, service settings, event history and ledger before starting the bot again.
 
 ## One-time SQLite-to-PostgreSQL migration
 
