@@ -16,10 +16,8 @@
 ## Invite reliability and notifications
 
 - Corrected the transcript-retention QA cleanup utility to delete `PartialMessage` objects without an unsupported `reason` argument and to tolerate fixture posts already removed by retention.
-
 - Fixed transcript retention to delete Discord message objects without an unsupported audit-reason argument, allowing the 100-message rolling window to prune old posts.
 - Treat an already auto-deleted ephemeral completion response as non-fatal, so a slow transcript-retention pass cannot make a completed ticket appear to have failed.
-
 - Committed successful invite-attribution inserts and leave-penalty attribution updates before later explicit SQLite transactions begin, preventing nested-transaction failures on the shared per-server connection.
 - Corrected invite reward audit-embed and inviter-DM line breaks so automatic debt-offset details render on separate lines.
 
@@ -47,12 +45,15 @@
 - `tests/test_credit_privacy.py`: self, owner, Administrator, configured moderator, ordinary member, Manage Server-only, and non-guild debt-visibility boundaries; verifies `/credits` only queries and displays debt after authorization.
 - `tests/test_database_isolation.py`: verifies invite-attribution writes are committed before invite reward and penalty transactions begin.
 - `tests/test_setup_commands.py`: verifies invite reward embeds and DMs use real line breaks.
+- `tests/test_transcript_message_deletion.py`: verifies transcript-retention message deletion uses the supported Discord API call.
+- `tests/test_interaction_utils.py`: verifies an already-removed ephemeral original response is non-fatal.
+- `tests/test_transcript_retention_cleanup.py`: verifies fixture cleanup can delete partial messages and tolerate posts already removed by retention.
 
 ## QA status — November 4, 2026
 
 - Local unit suite previously passed 106 tests before the latest three regression tests were added. Rerun the full suite after pulling the latest branch; the current expected count is 113.
-- Live Discord QA confirmed setup/dashboard initialization, public Help Center setup, SQLite/core-table/audit-channel diagnostics, balance and credit-history lookup, owner `/credits` lookup, manual `/penalty`, credit additions, partial/full debt repayment and overpayment rejection, invite event start/end, invite rewards with automatic debt offset, inviter leave penalties, and ticket creation/helper selection/completion/refunds.
-- Ordinary non-staff `/credits` debt hiding is covered by unit tests but has not yet been independently verified with a non-staff Discord account.
+- Live Discord QA confirmed setup/dashboard initialization, public Help Center setup, SQLite/core-table/audit-channel diagnostics, balance and credit-history lookup, owner and Administrator `/credits` debt visibility, ordinary-member suppression of another member's debt field, manual `/penalty`, credit additions, partial/full debt repayment and overpayment rejection, invite event start/end, invite rewards with automatic debt offset, inviter leave penalties, and ticket creation/helper selection/completion/refunds.
+- The non-staff `/credits` privacy path was verified live: a member without roles saw another member's available credits but no debt field. The target's debt was zero during this check; hiding a non-zero debt value has not been separately demonstrated live.
 - Automatic ticket-reward debt offset is unit-tested but has not been independently verified live.
 - Non-empty report filtering/pagination and full transcript delivery/retention still need live Discord acceptance testing.
 - Validate PostgreSQL behavior against a real PostgreSQL instance, not only the adapter unit tests.
