@@ -28,7 +28,9 @@
 
 ## Credit history
 
-- Added `/credit-history` with 10 entries per page, newest first, and private Previous/Next buttons. The existing `page` option remains available for direct page jumps. Pagination is bound to the command invoker, and staff access to another member's history is rechecked before each page is shown.
+- Added a shared ephemeral Previous/Next paginator for `/credit-history`, `/ticket-history`, and `/reports`. Existing `page` options remain available for direct page jumps; ticket history retains its configurable 1–10 ticket page size and reports retain their category filter while navigating.
+- Credit and ticket history pages are bound to the command invoker. Staff access is rechecked on every page interaction for another member's history and for staff-only ticket-history/report views. Controls are disabled after their short interaction session expires.
+- Added offset pagination to retained ticket history queries so pages do not overlap.
 - Members can view their own history. Viewing another member's history requires Administrator or configured moderator access.
 - Reuses the existing transaction ledger; no parallel history table is introduced.
 
