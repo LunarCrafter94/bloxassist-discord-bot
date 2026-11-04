@@ -1103,7 +1103,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 timestamp=discord.utils.utcnow(),
             )
             embed.description = (
-                f"Member ID: \`{member.id}\`\n"
+                f"Member ID: `{member.id}`\n"
                 f"Showing page {pageNumber} · {pageSize} ticket(s) per page. "
                 "The database retains ticket/transaction metadata even after the ticket channel is deleted."
             )
@@ -1111,7 +1111,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 ticketLabel = TicketLabelFromRow(row)
                 helpers = db._ParseIdCsv(str(row["helper_ids"] or ""))
                 value = (
-                    f"Status: **{row['status']}** · Event key: \`{row['event_key']}\`\n"
+                    f"Status: **{row['status']}** · Event key: `{row['event_key']}`\n"
                     f"Requester: <@{int(row['creator_id'])}> · Helpers: "
                     + (", ".join(f"<@{x}>" for x in helpers) or "none")
                     + f"\nReserved: {int(row['reserved_credits']):,} credits · Created: {row['created_at']}"
@@ -1199,7 +1199,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             if not visibleRows:
                 embed.description = "No open reports were found on this page for the selected category."
             else:
-                embed.description = "Use \`/report-review\` to confirm or dismiss a report after reviewing the available evidence."
+                embed.description = "Use `/report-review` to confirm or dismiss a report after reviewing the available evidence."
                 categoryLabels = {
                     "scam": "Scam / Fraud",
                     "bug": "Bug / Bot Issue",
@@ -1230,13 +1230,13 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                         else ("No member was attached to this report." if reportedUserId <= 0
                               else "No transcript/open ticket links found for this member.")
                     )
-                    memberText = f"<@{reportedUserId}> (\`{reportedUserId}\`)" if reportedUserId > 0 else "Not specified"
+                    memberText = f"<@{reportedUserId}> (`{reportedUserId}`)" if reportedUserId > 0 else "Not specified"
                     embed.add_field(
                         name=f"Report #{int(row['report_id'])} · {str(row['created_at'])}",
                         value=(
                             f"**Category:** {categoryLabel}\n"
                             f"**Reported member:** {memberText}\n"
-                            f"**Reporter:** <@{int(row['reporter_user_id'])}> (\`{int(row['reporter_user_id'])}\`)\n"
+                            f"**Reporter:** <@{int(row['reporter_user_id'])}> (`{int(row['reporter_user_id'])}`)\n"
                             f"**Details:** {str(row['details'])[:250]}\n"
                             f"**Related history:** {linksText}"
                         )[:1024],
