@@ -76,7 +76,7 @@ class EphemeralPaginatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(view.previous_button.disabled)
         self.assertEqual(calls, [1, 2, 1])
 
-    async def test_last_page_removes_controls(self):
+    async def test_last_page_keeps_previous_and_disables_next(self):
         view, _ = self.make_view(page=2, last_page=3)
         interaction = make_interaction()
 
@@ -85,8 +85,10 @@ class EphemeralPaginatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view.page, 3)
         self.assertEqual(view.embed.title, "Page 3")
         interaction.response.edit_message.assert_awaited_once()
-        self.assertIsNone(interaction.response.edit_message.await_args.kwargs["view"])
-        self.assertTrue(view.is_finished())
+        self.assertIs(interaction.response.edit_message.await_args.kwargs["view"], view)
+        self.assertFalse(view.previous_button.disabled)
+        self.assertTrue(view.next_button.disabled)
+        self.assertFalse(view.is_finished())
 
     async def test_cannot_advance_past_last_page(self):
         view, calls = self.make_view(page=3, last_page=3)
