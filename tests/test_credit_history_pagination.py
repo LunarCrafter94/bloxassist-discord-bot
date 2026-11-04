@@ -181,6 +181,25 @@ class CreditHistoryPaginationPermissionTests(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message.assert_awaited_once()
         self.assertTrue(view.is_finished())
 
+
+    async def test_navigation_changes_page_without_changing_target_user(self):
+        database = FakeDatabase(make_rows(25, target_user_id=300))
+        view = make_view(
+            database,
+            target_user_id=300,
+            requester_user_id=100,
+        )
+        response = SimpleNamespace(edit_message=AsyncMock())
+        interaction = SimpleNamespace(response=response)
+
+        await view._Navigate(interaction, 1)
+
+        self.assertEqual(database.calls, [(300, 11, 0), (300, 11, 10)])
+        self.assertIn("Member ID: 300", view.embed.description)
+        self.assertIn("Showing page 2", view.embed.description)
+        response.edit_message.assert_awaited_once()
+        self.assertIs(response.edit_message.await_args.kwargs["view"], view)
+
     async def test_staff_access_is_rechecked_and_allows_navigation(self):
         database = FakeDatabase(make_rows(25))
         staff_check = Mock(return_value=True)
