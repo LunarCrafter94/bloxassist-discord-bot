@@ -2205,9 +2205,13 @@ class GuildDatabase:
                 self.connection.rollback()
                 raise
 
-    def ListTicketHistoryForMember(self, userId: int, limit: int = 10) -> list[sqlite3.Row]:
+    def ListTicketHistoryForMember(
+        self, userId: int, limit: int = 10, *, offset: int = 0
+    ) -> list[sqlite3.Row]:
+        """Return newest-first retained ticket history with bounded pagination."""
         normalizedId = int(userId)
         safeLimit = max(1, min(25, int(limit)))
+        safeOffset = max(0, int(offset))
         token = str(normalizedId)
         return self.Execute(
             """SELECT * FROM tickets
@@ -2215,8 +2219,8 @@ class GuildDatabase:
                   OR (',' || helper_ids || ',') LIKE ('%%,' || ? || ',%%')
                   OR (',' || active_helper_ids || ',') LIKE ('%%,' || ? || ',%%')
                   OR (',' || replacement_candidate_ids || ',') LIKE ('%%,' || ? || ',%%')
-               ORDER BY ticket_id DESC LIMIT ?""",
-            (normalizedId, token, token, token, safeLimit), fetchAll=True,
+               ORDER BY ticket_id DESC LIMIT ? OFFSET ?""",
+            (normalizedId, token, token, token, safeLimit, safeOffset), fetchAll=True,
         )
 
     def CreateScamReport(
