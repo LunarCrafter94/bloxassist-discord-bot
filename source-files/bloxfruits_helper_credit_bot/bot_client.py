@@ -355,7 +355,8 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 return
             if penalty <= 0:
                 return
-            attribution = guildDatabase.GetInviteAttribution(member.id)
+            joinedAt = member.joined_at.isoformat() if member.joined_at is not None else None
+            attribution = guildDatabase.GetInviteAttribution(member.id, joinedAt=joinedAt)
             if attribution is None:
                 # No reliable invite attribution means no penalty; never guess or deduct
                 # from unrelated members.
