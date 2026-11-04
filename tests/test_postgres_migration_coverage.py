@@ -65,6 +65,10 @@ class PostgresMigrationCoverageTests(unittest.TestCase):
         self.assertIn('"next_ticket_channel_number": "1"', source)
         self.assertIn('"next_ticket_sequence": "1"', source)
 
+    def test_fresh_target_check_includes_repeat_inviter_leave_penalty_default(self):
+        source = MIGRATION_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('"invite_leave_penalty_repeat_on_rejoin": "false"', source)
+
     def test_insert_and_delete_orders_respect_foreign_keys(self):
         tables = read_module_constant("TABLES")
         delete_order = read_module_constant("DELETE_ORDER")
