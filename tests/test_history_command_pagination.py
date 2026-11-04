@@ -45,6 +45,12 @@ class HistoryCommandPaginationWiringTests(unittest.TestCase):
         self.assertIn("offset=(pageNumber - 1) * 5", reports)
         self.assertIn("len(rows) > 5", reports)
 
+    def test_ticket_history_member_transformer_error_is_actionable(self):
+        error_handler = self.botText[self.botText.index("def AppCommandErrorMessage("):]
+        error_handler = error_handler[:error_handler.index("\n\ndef IsServerOwner")]
+        self.assertIn('if commandName == "ticket-history":', error_handler)
+        self.assertIn("Select a member who is currently in this server", error_handler)
+
     def test_existing_direct_page_options_are_preserved(self):
         ticket_history = self._command_body("ticket-history", "reports")
         reports = self._command_body("reports", "report-review")
