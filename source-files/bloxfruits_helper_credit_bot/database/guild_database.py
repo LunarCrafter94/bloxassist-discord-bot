@@ -634,12 +634,17 @@ class GuildDatabase:
         if invitedId <= 0 or inviterId <= 0 or invitedId == inviterId:
             return False
         with self.databaseLock:
-            cursor = self.connection.execute(
-                """INSERT INTO invite_attributions(invited_user_id, inviter_user_id, invite_code)
-                   VALUES (?, ?, ?) ON CONFLICT(invited_user_id) DO NOTHING""",
-                (invitedId, inviterId, str(inviteCode)[:100]),
-            )
-            return cursor.rowcount == 1
+            try:
+                cursor = self.connection.execute(
+                    """INSERT INTO invite_attributions(invited_user_id, inviter_user_id, invite_code)
+                       VALUES (?, ?, ?) ON CONFLICT(invited_user_id) DO NOTHING""",
+                    (invitedId, inviterId, str(inviteCode)[:100]),
+                )
+                self.connection.commit()
+                return cursor.rowcount == 1
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def GetInviteAttribution(self, invitedUserId: int):
         return self.Execute(
@@ -649,11 +654,16 @@ class GuildDatabase:
 
     def MarkInviteLeavePenaltyApplied(self, invitedUserId: int) -> bool:
         with self.databaseLock:
-            cursor = self.connection.execute(
-                "UPDATE invite_attributions SET penalty_applied = 1 WHERE invited_user_id = ? AND penalty_applied = 0",
-                (int(invitedUserId),),
-            )
-            return cursor.rowcount == 1
+            try:
+                cursor = self.connection.execute(
+                    "UPDATE invite_attributions SET penalty_applied = 1 WHERE invited_user_id = ? AND penalty_applied = 0",
+                    (int(invitedUserId),),
+                )
+                self.connection.commit()
+                return cursor.rowcount == 1
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def GetCreditDebt(self, userId: int) -> int:
         row = self.Execute("SELECT amount FROM credit_debts WHERE user_id = ?", (int(userId),), fetchOne=True)
