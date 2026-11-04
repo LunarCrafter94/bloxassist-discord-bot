@@ -10,6 +10,7 @@ import discord
 
 from ..database import DatabaseManager, GuildDatabase
 from ..interaction_utils import SendEphemeralResponse
+from ..invites.invite_events import FormatInviteEventCountdown
 from ..ticket_messages import DEFAULT_TICKET_WELCOME_MESSAGE, RenderTicketWelcomeMessage
 
 logger = logging.getLogger(__name__)
@@ -254,9 +255,14 @@ def BuildDashboardEmbed(guild: discord.Guild, guildDatabase: GuildDatabase) -> d
     )
     activeInviteEvent = guildDatabase.GetActiveInviteEvent()
     if activeInviteEvent is not None:
+        countdown = FormatInviteEventCountdown(activeInviteEvent)
         embed.add_field(
             name="Active invite event",
-            value=f"Event #{int(activeInviteEvent['event_id'])} · {int(activeInviteEvent['reward_credits']):,} credits per eligible join\nEnds: {activeInviteEvent['ends_at']}",
+            value=(
+                f"Event #{int(activeInviteEvent['event_id'])} · "
+                f"{int(activeInviteEvent['reward_credits']):,} credits per eligible join\n"
+                f"Time remaining: {countdown}"
+            ),
             inline=False,
         )
     else:
