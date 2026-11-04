@@ -55,6 +55,7 @@
 - Live Discord QA confirmed setup/dashboard initialization, public Help Center setup, SQLite/core-table/audit-channel diagnostics, balance and credit-history lookup, owner and Administrator `/credits` debt visibility, ordinary-member suppression of another member's debt field, manual `/penalty`, credit additions, partial/full debt repayment and overpayment rejection, invite event start/end, invite rewards with automatic debt offset, inviter leave penalties, and ticket creation/helper selection/completion/refunds.
 - The non-staff `/credits` privacy path was verified live: a member without roles saw another member's available credits but no debt field. The target's debt was zero during this check; hiding a non-zero debt value has not been separately demonstrated live.
 - Automatic ticket-reward debt offset is unit-tested but has not been independently verified live.
-- Non-empty report filtering/pagination and full transcript delivery/retention still need live Discord acceptance testing.
+- Live Discord QA verified non-empty `/reports` pagination with six reports: page 1 returned five reports (#6–#2), page 2 returned the remaining report (#1), and the Bug / Bot Issue category filter returned only reports #2 and #1.
+- Full transcript delivery, direct history links, and 100-message rolling transcript retention passed live QA.
 - Validate PostgreSQL behavior against a real PostgreSQL instance, not only the adapter unit tests.
 
