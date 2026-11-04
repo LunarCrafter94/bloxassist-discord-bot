@@ -433,8 +433,15 @@ class PerGuildDatabaseTests(unittest.TestCase):
             invitedId, inviterId, "cycle-code",
             repeatOnRejoin=True, joinedAt="2026-11-04T11:00:00+00:00",
         )
+        self.assertIsNone(
+            self.guildA.GetInviteAttribution(
+                invitedId, joinedAt="2026-11-04T10:00:00+00:00"
+            )
+        )
         self.assertFalse(self.guildA.MarkInviteLeavePenaltyApplied(invitedId, joinCycle=1))
-        current = self.guildA.GetInviteAttribution(invitedId)
+        current = self.guildA.GetInviteAttribution(
+            invitedId, joinedAt="2026-11-04T11:00:00+00:00"
+        )
         self.assertEqual(int(current["join_cycle"]), 2)
         self.assertEqual(int(current["penalty_applied"]), 0)
 
