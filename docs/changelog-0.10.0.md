@@ -13,6 +13,11 @@
 - Updated `/balance` to show available credits, outstanding debt, and net position.
 - Updated `/credits` to show available credits to all members, while limiting another member's debt details to that member, the server owner, Administrators, and configured dashboard moderators.
 
+## Invite reliability and notifications
+
+- Committed successful invite-attribution inserts and leave-penalty attribution updates before later explicit SQLite transactions begin, preventing nested-transaction failures on the shared per-server connection.
+- Corrected invite reward audit-embed and inviter-DM line breaks so automatic debt-offset details render on separate lines.
+
 ## Credit history
 
 - Added `/credit-history` with 10 entries per page, newest first.
@@ -35,10 +40,15 @@
 - `tests/test_debt_repayment.py`: partial/full repayment, invalid amounts, no debt, insufficient credits, overpayment, idempotency conflicts, ledger entries, credit-history pagination, and automatic ticket-reward debt offsets.
 - `tests/test_report_pagination.py`: non-overlapping pages, category filtering, and all-category pagination.
 - `tests/test_credit_privacy.py`: self, owner, Administrator, configured moderator, ordinary member, Manage Server-only, and non-guild debt-visibility boundaries; verifies `/credits` only queries and displays debt after authorization.
+- `tests/test_database_isolation.py`: verifies invite-attribution writes are committed before invite reward and penalty transactions begin.
+- `tests/test_setup_commands.py`: verifies invite reward embeds and DMs use real line breaks.
 
-## Verification still required
+## QA status — November 4, 2026
 
-- Run the complete unittest suite against the branch.
-- Validate PostgreSQL behavior against a real PostgreSQL instance, not only SQLite.
-- Test Discord command registration and owner/staff permission boundaries in a separate test server.
-- Verify audit-log delivery and report navigation in Discord before deployment.
+- Local unit suite previously passed 106 tests before the latest three regression tests were added. Rerun the full suite after pulling the latest branch; the current expected count is 109.
+- Live Discord QA confirmed setup/dashboard initialization, public Help Center setup, SQLite/core-table/audit-channel diagnostics, balance and credit-history lookup, owner `/credits` lookup, manual `/penalty`, credit additions, partial/full debt repayment and overpayment rejection, invite event start/end, invite rewards with automatic debt offset, inviter leave penalties, and ticket creation/helper selection/completion/refunds.
+- Ordinary non-staff `/credits` debt hiding is covered by unit tests but has not yet been independently verified with a non-staff Discord account.
+- Automatic ticket-reward debt offset is unit-tested but has not been independently verified live.
+- Non-empty report filtering/pagination and full transcript delivery/retention still need live Discord acceptance testing.
+- Validate PostgreSQL behavior against a real PostgreSQL instance, not only the adapter unit tests.
+
