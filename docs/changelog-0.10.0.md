@@ -48,7 +48,7 @@
 
 ## QA status — November 4, 2026
 
-- Local unit suite previously passed 106 tests before the latest three regression tests were added. Rerun the full suite after pulling the latest branch; the current expected count is 109.
+- Local unit suite previously passed 106 tests before the latest three regression tests were added. Rerun the full suite after pulling the latest branch; the current expected count is 111.
 - Live Discord QA confirmed setup/dashboard initialization, public Help Center setup, SQLite/core-table/audit-channel diagnostics, balance and credit-history lookup, owner `/credits` lookup, manual `/penalty`, credit additions, partial/full debt repayment and overpayment rejection, invite event start/end, invite rewards with automatic debt offset, inviter leave penalties, and ticket creation/helper selection/completion/refunds.
 - Ordinary non-staff `/credits` debt hiding is covered by unit tests but has not yet been independently verified with a non-staff Discord account.
 - Automatic ticket-reward debt offset is unit-tested but has not been independently verified live.
