@@ -1,5 +1,12 @@
 """Regression test for Discord transcript-message deletion calls."""
 
+from pathlib import Path
+import sys
+
+SOURCE_ROOT = Path(__file__).resolve().parents[1] / "source-files"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
 import unittest
 
 from bloxfruits_helper_credit_bot.tickets.ticket_views import _DeleteTranscriptMessage
