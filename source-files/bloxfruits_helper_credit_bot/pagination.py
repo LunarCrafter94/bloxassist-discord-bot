@@ -146,7 +146,8 @@ class EphemeralPaginator(discord.ui.View):
 
     async def on_timeout(self) -> None:
         """Disable stale controls while leaving the private result readable."""
-        self.disable_all_items()
+        for item in self.children:
+            item.disabled = True
         try:
             await EditEphemeralOriginalResponse(
                 self.originInteraction,
