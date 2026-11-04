@@ -463,9 +463,16 @@ class PerGuildDatabaseTests(unittest.TestCase):
         databasePath = self.guildA.databasePath
         self.databaseManager.CloseAll()
 
-        with sqlite3.connect(databasePath) as connection:
+        connection = sqlite3.connect(databasePath)
+        try:
             connection.execute("ALTER TABLE invite_attributions DROP COLUMN joined_at")
             connection.execute("ALTER TABLE invite_attributions DROP COLUMN join_cycle")
+            connection.commit()
+        finally:
+            # sqlite3.Connection's context manager commits/rolls back but does not
+            # close the connection. Explicitly close it so Windows can clean up the
+            # temporary database directory during unittest tearDown.
+            connection.close()
 
         self.databaseManager = DatabaseManager(
             dataDir,
