@@ -108,6 +108,8 @@ def assert_target_is_fresh(database) -> None:
         "dashboard_message_id": "",
         "audit_log_channel_id": "",
         "ticket_welcome_message": DEFAULT_TICKET_WELCOME_MESSAGE,
+        "next_ticket_channel_number": "1",
+        "next_ticket_sequence": "1",
     }
     if settings != expected_settings:
         raise RuntimeError(
