@@ -1205,7 +1205,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         summary = db.GetMemberActivitySummary(targetUserId)
         embed = discord.Embed(
             title=f"🧾 Member activity · {targetLabel}",
-            description=f"User ID: `{targetUserId}` · Read-only server record summary.",
+            description=f"User ID: `{targetUserId}` · Read-only summary of records currently retained by this server.",
             color=discord.Color.blurple(),
             timestamp=discord.utils.utcnow(),
         )
@@ -1219,7 +1219,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             name="Retained activity",
             value=(
                 f"Transactions: **{int(summary['transaction_count']):,}**\n"
-                f"Tickets: **{int(summary['ticket_count']):,}** "
+                f"Retained tickets: **{int(summary['ticket_count']):,}** "
                 f"(open: **{int(summary['open_ticket_count']):,}**)"
             ),
             inline=True,
@@ -1251,7 +1251,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             value="\n".join(ticketLines)[:1024] if ticketLines else "No retained ticket history.",
             inline=False,
         )
-        embed.set_footer(text="Only the latest 5 transactions and 3 tickets are shown.")
+        embed.set_footer(text="Latest 5 transactions and 3 tickets shown. Older completed ticket records may have been pruned by retention.")
         await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
 
     @bot.tree.command(name="reports", description="Staff only: browse reports by status, category, and page.")
