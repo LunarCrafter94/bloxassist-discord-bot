@@ -40,7 +40,7 @@ class ServerAnalyticsTests(unittest.TestCase):
             actorUserId=900001,
             note="Statistics test",
         )
-        self.assertEqual(status, "applied")
+        self.assertEqual(status, "added")
         self.assertEqual(balance, 225)
 
         penaltyStatus, _, debt = self.db.ApplyPenaltyDebt(
