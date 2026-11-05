@@ -1319,9 +1319,17 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 text=f"Page {pageNumber} · 5 reports per page · {statusText} · {categoryText}"
             )
             if not visibleRows:
-                embed.description = f"No {statusText.lower()} reports were found for the selected category."
-            else:
+                if statusValue == "all":
+                    emptyStatusText = "reports"
+                else:
+                    emptyStatusText = f"{statusText.lower()} reports"
+                embed.description = f"No {emptyStatusText} were found for the selected category."
+            elif statusValue == "open":
                 embed.description = "Use `/report-review` to confirm or dismiss an open report after reviewing the available evidence."
+            elif statusValue == "all":
+                embed.description = "Open reports can be reviewed with `/report-review`. Previously reviewed reports include their reviewer and saved note."
+            else:
+                embed.description = "These reports have already been reviewed. Their recorded reviewer and note are shown where available."
                 categoryLabels = {
                     "scam": "Scam / Fraud",
                     "bug": "Bug / Bot Issue",
@@ -1353,13 +1361,24 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                               else "No transcript/open ticket links found for this member.")
                     )
                     memberText = f"<@{reportedUserId}> (`{reportedUserId}`)" if reportedUserId > 0 else "Not specified"
+                    reportStatus = str(row["status"]).title()
+                    reviewText = ""
+                    if str(row["status"]) != "open":
+                        reviewerId = int(row["reviewed_by"] or 0)
+                        reviewerText = f"<@{reviewerId}> (`{reviewerId}`)" if reviewerId > 0 else "Not recorded"
+                        reviewNote = str(row["review_note"] or "No review note was saved.")
+                        reviewText = (
+                            f"**Reviewed by:** {reviewerText}\n"
+                            f"**Review note:** {reviewNote[:180]}\n"
+                        )
                     embed.add_field(
-                        name=f"Report #{int(row['report_id'])} · {str(row['created_at'])}",
+                        name=f"Report #{int(row['report_id'])} · {reportStatus} · {str(row['created_at'])}",
                         value=(
                             f"**Category:** {categoryLabel}\n"
                             f"**Reported member:** {memberText}\n"
                             f"**Reporter:** <@{int(row['reporter_user_id'])}> (`{int(row['reporter_user_id'])}`)\n"
                             f"**Details:** {str(row['details'])[:250]}\n"
+                            f"{reviewText}"
                             f"**Related history:** {linksText}"
                         )[:1024],
                         inline=False,
