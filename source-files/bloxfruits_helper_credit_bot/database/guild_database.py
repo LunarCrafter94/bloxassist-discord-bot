@@ -2205,6 +2205,105 @@ class GuildDatabase:
                 self.connection.rollback()
                 raise
 
+    def GetServerStatistics(self) -> dict[str, Any]:
+        """Return read-only aggregate metrics for the current server."""
+        memberRow = self.Execute(
+            """SELECT COUNT(*) AS tracked_members,
+                      COALESCE(SUM(credits), 0) AS available_credits
+               FROM users""",
+            fetchOne=True,
+        )
+        debtRow = self.Execute(
+            """SELECT COUNT(*) AS debtors,
+                      COALESCE(SUM(amount), 0) AS outstanding_debt
+               FROM credit_debts
+               WHERE amount > 0""",
+            fetchOne=True,
+        )
+        ticketRows = self.Execute(
+            "SELECT status, COUNT(*) AS amount FROM tickets GROUP BY status",
+            fetchAll=True,
+        )
+        reportRows = self.Execute(
+            "SELECT status, COUNT(*) AS amount FROM scam_reports GROUP BY status",
+            fetchAll=True,
+        )
+        ledgerRow = self.Execute(
+            "SELECT COUNT(*) AS amount FROM transactions",
+            fetchOne=True,
+        )
+        inviteRewardRow = self.Execute(
+            """SELECT COUNT(*) AS amount,
+                      COALESCE(SUM(reward_credits), 0) AS credits
+               FROM invite_rewards""",
+            fetchOne=True,
+        )
+        serviceRow = self.Execute(
+            "SELECT COUNT(*) AS amount FROM services WHERE active = 1",
+            fetchOne=True,
+        )
+        return {
+            "tracked_members": int(memberRow["tracked_members"] or 0),
+            "available_credits": int(memberRow["available_credits"] or 0),
+            "debtors": int(debtRow["debtors"] or 0),
+            "outstanding_debt": int(debtRow["outstanding_debt"] or 0),
+            "ticket_statuses": {
+                str(row["status"]): int(row["amount"]) for row in ticketRows
+            },
+            "report_statuses": {
+                str(row["status"]): int(row["amount"]) for row in reportRows
+            },
+            "ledger_entries": int(ledgerRow["amount"] or 0),
+            "invite_reward_count": int(inviteRewardRow["amount"] or 0),
+            "invite_reward_credits": int(inviteRewardRow["credits"] or 0),
+            "enabled_services": int(serviceRow["amount"] or 0),
+            "active_invite_event": self.GetActiveInviteEvent() is not None,
+        }
+
+    def GetMemberActivitySummary(
+        self,
+        userId: int,
+        *,
+        recentTransactionLimit: int = 5,
+        recentTicketLimit: int = 3,
+    ) -> dict[str, Any]:
+        """Return read-only member balances and retained activity without creating an account."""
+        normalizedId = int(userId)
+        token = str(normalizedId)
+        ticketConditions = """creator_id = ?
+            OR (',' || helper_ids || ',') LIKE ('%%,' || ? || ',%%')
+            OR (',' || active_helper_ids || ',') LIKE ('%%,' || ? || ',%%')
+            OR (',' || replacement_candidate_ids || ',') LIKE ('%%,' || ? || ',%%')"""
+        ticketCounts = self.Execute(
+            f"""SELECT COUNT(*) AS total_tickets,
+                       COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0) AS open_tickets
+                FROM tickets
+                WHERE {ticketConditions}""",
+            (normalizedId, token, token, token),
+            fetchOne=True,
+        )
+        transactionCount = self.Execute(
+            "SELECT COUNT(*) AS amount FROM transactions WHERE from_user = ? OR to_user = ?",
+            (normalizedId, normalizedId),
+            fetchOne=True,
+        )
+        account = self.GetUser(normalizedId)
+        return {
+            "user_id": normalizedId,
+            "account": account,
+            "available_credits": int(account["credits"]) if account is not None else None,
+            "outstanding_debt": self.GetCreditDebt(normalizedId),
+            "transaction_count": int(transactionCount["amount"] or 0),
+            "ticket_count": int(ticketCounts["total_tickets"] or 0),
+            "open_ticket_count": int(ticketCounts["open_tickets"] or 0),
+            "recent_transactions": self.ListCreditTransactions(
+                normalizedId, limit=max(1, min(10, int(recentTransactionLimit)))
+            ),
+            "recent_tickets": self.ListTicketHistoryForMember(
+                normalizedId, limit=max(1, min(10, int(recentTicketLimit)))
+            ),
+        }
+
     def ListTicketHistoryForMember(
         self, userId: int, limit: int = 10, *, offset: int = 0
     ) -> list[sqlite3.Row]:
