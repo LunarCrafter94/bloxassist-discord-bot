@@ -178,6 +178,78 @@ async def ApplyTicketStaffRolePolicy(
     return updatedChannels, failedChannelIds
 
 
+def BuildServerStatisticsEmbed(guild: discord.Guild, guildDatabase: GuildDatabase) -> discord.Embed:
+    """Build a private, read-only snapshot of server-scoped BloxAssist activity."""
+    stats = guildDatabase.GetServerStatistics()
+    ticketStatuses = stats["ticket_statuses"]
+    reportStatuses = stats["report_statuses"]
+    ticketTotal = sum(int(value) for value in ticketStatuses.values())
+    reportTotal = sum(int(value) for value in reportStatuses.values())
+
+    ticketBreakdown = (
+        "\n".join(
+            f"• {str(status).replace('_', ' ').title()}: **{int(amount):,}**"
+            for status, amount in sorted(ticketStatuses.items())
+        )
+        if ticketStatuses else "No retained ticket records."
+    )
+    reportBreakdown = (
+        "\n".join(
+            f"• {str(status).title()}: **{int(amount):,}**"
+            for status, amount in sorted(reportStatuses.items())
+        )
+        if reportStatuses else "No reports recorded."
+    )
+
+    embed = discord.Embed(
+        title=f"📊 Server statistics · {guild.name[:100]}",
+        description="Private, read-only snapshot of this server's BloxAssist records.",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(
+        name="Members and credits",
+        value=(
+            f"Tracked accounts: **{int(stats['tracked_members']):,}**\n"
+            f"Available credits: **{int(stats['available_credits']):,}**\n"
+            f"Outstanding debt: **{int(stats['outstanding_debt']):,}** "
+            f"across **{int(stats['debtors']):,}** debtor(s)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"Tickets · {ticketTotal:,} retained",
+        value=ticketBreakdown[:1024],
+        inline=True,
+    )
+    embed.add_field(
+        name=f"Reports · {reportTotal:,} total",
+        value=reportBreakdown[:1024],
+        inline=True,
+    )
+    embed.add_field(
+        name="Credit ledger",
+        value=f"**{int(stats['ledger_entries']):,}** retained transaction record(s)",
+        inline=True,
+    )
+    embed.add_field(
+        name="Service catalog",
+        value=f"**{int(stats['enabled_services']):,}** enabled service(s)",
+        inline=True,
+    )
+    embed.add_field(
+        name="Invite rewards",
+        value=(
+            f"Reward records: **{int(stats['invite_reward_count']):,}**\n"
+            f"Gross rewards recorded: **{int(stats['invite_reward_credits']):,} credits**\n"
+            f"Active event: **{'Yes' if stats['active_invite_event'] else 'No'}**"
+        ),
+        inline=True,
+    )
+    embed.set_footer(text="Counts reflect records currently retained in this server's database.")
+    return embed
+
+
 def BuildDashboardEmbed(guild: discord.Guild, guildDatabase: GuildDatabase) -> discord.Embed:
     activeServices = guildDatabase.ListServices(activeOnly=True)
     serviceLines = [
@@ -398,6 +470,17 @@ class DashboardView(discord.ui.View):
             embed=BuildServiceCatalogEmbed(self.databaseManager.ForServer(interaction.guild_id)),
             content="Select an event first, then choose an action below.",
             view=view,
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Server Statistics", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="bf:dashboard:server_statistics", row=1)
+    async def ServerStatistics(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await EnsureDashboardAccess(interaction, self.databaseManager):
+            return
+        db = self.databaseManager.ForServer(interaction.guild_id)
+        await SendEphemeralResponse(
+            interaction,
+            embed=BuildServerStatisticsEmbed(interaction.guild, db),
             ephemeral=True,
         )
 
