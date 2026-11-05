@@ -40,6 +40,14 @@
 - Checks database connectivity, core tables, audit-channel availability, and the bot's audit-channel permissions.
 - Does not display connection strings, credentials, or secret values.
 
+## Staff history and analytics
+
+- Extended staff-only `/ticket-history` to accept either a current server member or a numeric `user_id`, so retained tickets can be reviewed for former members. Existing page-size and Previous/Next controls are preserved.
+- Added a status filter to `/reports` for Open, Confirmed, Dismissed, and All reports. Category and status filters persist while navigating pages; reviewed reports show the recorded reviewer and review note where available.
+- Added a private **Server Statistics** panel to the persistent Admin Dashboard. It summarizes tracked accounts, available credits, outstanding debt, tickets and reports by status, ledger entries, enabled services, and invite reward totals.
+- Added staff-only `/member-activity`, combining a member's available balance, outstanding debt, transaction/ticket counts, recent credit transactions, and recent retained tickets. It accepts numeric IDs for former members and never creates an account during lookup.
+- Added read-only database aggregate methods and regression coverage for statistics, member activity, former-member lookup wiring, report filters, and dashboard access.
+
 ## Report navigation
 
 - Added page navigation and optional category filtering to `/reports`.
