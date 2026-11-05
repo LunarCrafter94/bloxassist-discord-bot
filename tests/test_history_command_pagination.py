@@ -21,7 +21,8 @@ class HistoryCommandPaginationWiringTests(unittest.TestCase):
 
     def test_all_page_and_history_commands_use_shared_paginator(self):
         credit_history = self._command_body("credit-history", "diagnostics")
-        ticket_history = self._command_body("ticket-history", "reports")
+        ticket_history = self._command_body("ticket-history", "member-activity")
+        member_activity = self._command_body("member-activity", "reports")
         reports = self._command_body("reports", "report-review")
 
         self.assertIn("CreditHistoryView(", credit_history)
@@ -31,9 +32,11 @@ class HistoryCommandPaginationWiringTests(unittest.TestCase):
                 self.assertIn("EphemeralPaginator(", body)
                 self.assertIn("page=int(page)", body)
                 self.assertIn("accessCheck=", body)
+        self.assertIn("GetMemberActivitySummary(", member_activity)
+        self.assertIn("HasConfiguredStaffAccess(", member_activity)
 
     def test_ticket_history_passes_offset_for_disjoint_pages(self):
-        ticket_history = self._command_body("ticket-history", "reports")
+        ticket_history = self._command_body("ticket-history", "member-activity")
         self.assertIn("pageSize + 1", ticket_history)
         self.assertIn("offset=(pageNumber - 1) * pageSize", ticket_history)
         self.assertIn("len(rows) > pageSize", ticket_history)
@@ -50,6 +53,29 @@ class HistoryCommandPaginationWiringTests(unittest.TestCase):
         error_handler = error_handler[:error_handler.index("\n\ndef IsServerOwner")]
         self.assertIn('if commandName == "ticket-history":', error_handler)
         self.assertIn("Select a member who is currently in this server", error_handler)
+
+    def test_ticket_history_accepts_numeric_ids_for_former_members(self):
+        ticket_history = self._command_body("ticket-history", "member-activity")
+        self.assertIn("member: discord.Member | None = None", ticket_history)
+        self.assertIn("user_id: str | None = None", ticket_history)
+        self.assertIn("ResolveCreditLookupUserId(member, user_id)", ticket_history)
+        self.assertIn("targetUserId,", ticket_history)
+        self.assertIn("HasConfiguredStaffAccess(", ticket_history)
+
+    def test_reports_filter_by_status_and_preserve_it_during_pagination(self):
+        reports = self._command_body("reports", "report-review")
+        for status in ('value="open"', 'value="confirmed"', 'value="dismissed"', 'value="all"'):
+            self.assertIn(status, reports)
+        self.assertIn("status: app_commands.Choice[str] | None = None", reports)
+        self.assertIn("status=statusValue", reports)
+        self.assertIn("offset=(pageNumber - 1) * 5", reports)
+
+    def test_server_statistics_are_exposed_through_authorized_dashboard_button(self):
+        dashboard = self.DASHBOARD_VIEWS.read_text(encoding="utf-8")
+        self.assertIn("def BuildServerStatisticsEmbed(", dashboard)
+        self.assertIn('custom_id="bf:dashboard:server_statistics"', dashboard)
+        self.assertIn("EnsureDashboardAccess(interaction, self.databaseManager)", dashboard)
+        self.assertIn("GetServerStatistics()", dashboard)
 
     def test_existing_direct_page_options_are_preserved(self):
         ticket_history = self._command_body("ticket-history", "reports")
