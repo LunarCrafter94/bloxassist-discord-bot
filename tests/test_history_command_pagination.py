@@ -7,6 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 BOT_CLIENT = ROOT / "source-files" / "bloxfruits_helper_credit_bot" / "bot_client.py"
 CREDIT_HISTORY_VIEW = ROOT / "source-files" / "bloxfruits_helper_credit_bot" / "credits" / "credit_history_view.py"
+DASHBOARD_VIEWS = ROOT / "source-files" / "bloxfruits_helper_credit_bot" / "admin" / "dashboard_views.py"
 
 
 class HistoryCommandPaginationWiringTests(unittest.TestCase):
@@ -43,7 +44,7 @@ class HistoryCommandPaginationWiringTests(unittest.TestCase):
 
     def test_reports_preserve_category_filter_while_navigating(self):
         reports = self._command_body("reports", "report-review")
-        self.assertIn("categoryValue = category.value if category else None", reports)
+        self.assertIn("categoryValue = category.value if category and category.value != \"all\" else None", reports)
         self.assertIn("reportType=categoryValue", reports)
         self.assertIn("offset=(pageNumber - 1) * 5", reports)
         self.assertIn("len(rows) > 5", reports)
@@ -52,7 +53,7 @@ class HistoryCommandPaginationWiringTests(unittest.TestCase):
         error_handler = self.botText[self.botText.index("def AppCommandErrorMessage("):]
         error_handler = error_handler[:error_handler.index("\n\ndef IsServerOwner")]
         self.assertIn('if commandName == "ticket-history":', error_handler)
-        self.assertIn("Select a member who is currently in this server", error_handler)
+        self.assertIn("use the user_id option with their numeric Discord User ID", error_handler)
 
     def test_ticket_history_accepts_numeric_ids_for_former_members(self):
         ticket_history = self._command_body("ticket-history", "member-activity")
@@ -71,14 +72,14 @@ class HistoryCommandPaginationWiringTests(unittest.TestCase):
         self.assertIn("offset=(pageNumber - 1) * 5", reports)
 
     def test_server_statistics_are_exposed_through_authorized_dashboard_button(self):
-        dashboard = self.DASHBOARD_VIEWS.read_text(encoding="utf-8")
+        dashboard = DASHBOARD_VIEWS.read_text(encoding="utf-8")
         self.assertIn("def BuildServerStatisticsEmbed(", dashboard)
         self.assertIn('custom_id="bf:dashboard:server_statistics"', dashboard)
         self.assertIn("EnsureDashboardAccess(interaction, self.databaseManager)", dashboard)
         self.assertIn("GetServerStatistics()", dashboard)
 
     def test_existing_direct_page_options_are_preserved(self):
-        ticket_history = self._command_body("ticket-history", "reports")
+        ticket_history = self._command_body("ticket-history", "member-activity")
         reports = self._command_body("reports", "report-review")
         credit_history = self._command_body("credit-history", "diagnostics")
 
