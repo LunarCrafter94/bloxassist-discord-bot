@@ -72,16 +72,10 @@ def ResolveCreditLookupUserId(
 def AppCommandErrorMessage(commandName: str, error: Exception) -> str:
     """Return a safe, actionable response for common slash-command errors."""
     if isinstance(error, app_commands.TransformerError):
-        if commandName in {"credits", "credit-history"}:
+        if commandName in {"credits", "credit-history", "ticket-history", "member-activity"}:
             return (
-                "I couldn't resolve that member. The member option only accepts someone "
-                "currently in this server. To look up a former member, use the user_id "
-                "option and enter their numeric Discord User ID."
-            )
-        if commandName == "ticket-history":
-            return (
-                "I couldn't resolve the selected member for `/ticket-history`. "
-                "Select a member who is currently in this server and try again."
+                "I couldn't resolve that member. Select someone currently in this server "
+                "or use the user_id option with their numeric Discord User ID."
             )
         return "I couldn't understand one of the command options. Check the selected value and try again."
     if isinstance(error, app_commands.CheckFailure):
@@ -1072,16 +1066,18 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
 
     bot.tree.add_command(inviteEventGroup)
 
-    @bot.tree.command(name="ticket-history", description="Staff only: review a member's retained ticket history.")
+    @bot.tree.command(name="ticket-history", description="Staff only: review retained tickets for a current or former member.")
     @app_commands.guild_only()
     @app_commands.describe(
-        member="The member whose tickets you want to review",
+        member="Current server member (optional when user_id is supplied)",
+        user_id="Numeric Discord User ID; works for former members",
         limit="Tickets per page (1–10)",
         page="History page (buttons also available)",
     )
     async def TicketHistory(
         interaction: discord.Interaction,
-        member: discord.Member,
+        member: discord.Member | None = None,
+        user_id: str | None = None,
         limit: app_commands.Range[int, 1, 10] = 10,
         page: app_commands.Range[int, 1, 1000] = 1,
     ) -> None:
@@ -1091,24 +1087,38 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         if not HasConfiguredStaffAccess(interaction, databaseManager):
             await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can view ticket history.", ephemeral=True)
             return
+        try:
+            targetUserId = ResolveCreditLookupUserId(member, user_id)
+        except ValueError as error:
+            await SendEphemeralResponse(interaction, str(error), ephemeral=True)
+            return
+        if targetUserId is None:
+            await SendEphemeralResponse(
+                interaction,
+                "Choose a current member or enter their numeric Discord User ID in user_id.",
+                ephemeral=True,
+            )
+            return
 
         db = databaseManager.ForServer(interaction.guild_id)
+        targetMember = member or interaction.guild.get_member(targetUserId)
+        targetLabel = str(targetMember) if targetMember is not None else f"User ID {targetUserId}"
         pageSize = int(limit)
 
         def LoadTicketHistoryPage(pageNumber: int) -> tuple[discord.Embed, bool]:
             rows = db.ListTicketHistoryForMember(
-                member.id,
+                targetUserId,
                 pageSize + 1,
                 offset=(pageNumber - 1) * pageSize,
             )
             visibleRows = rows[:pageSize]
             embed = discord.Embed(
-                title=f"📚 Ticket history · {member}",
+                title=f"📚 Ticket history · {targetLabel}",
                 color=discord.Color.blurple(),
                 timestamp=discord.utils.utcnow(),
             )
             embed.description = (
-                f"Member ID: `{member.id}`\n"
+                f"Member ID: `{targetUserId}`\n"
                 f"Showing page {pageNumber} · {pageSize} ticket(s) per page. "
                 "The database retains ticket/transaction metadata even after the ticket channel is deleted."
             )
@@ -1155,24 +1165,123 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         if not view.has_navigation:
             view.stop()
 
-    @bot.tree.command(name="reports", description="Staff only: browse open reports by category and page.")
+    @bot.tree.command(name="member-activity", description="Staff only: summarize a member's credits, debt, transactions, and tickets.")
+    @app_commands.guild_only()
+    @app_commands.describe(
+        member="Current server member (optional when user_id is supplied)",
+        user_id="Numeric Discord User ID; works for former members",
+    )
+    async def MemberActivity(
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        if not HasConfiguredStaffAccess(interaction, databaseManager):
+            await SendEphemeralResponse(
+                interaction,
+                "Only Administrators or configured dashboard moderators can view member activity.",
+                ephemeral=True,
+            )
+            return
+        try:
+            targetUserId = ResolveCreditLookupUserId(member, user_id)
+        except ValueError as error:
+            await SendEphemeralResponse(interaction, str(error), ephemeral=True)
+            return
+        if targetUserId is None:
+            await SendEphemeralResponse(
+                interaction,
+                "Choose a current member or enter their numeric Discord User ID in user_id.",
+                ephemeral=True,
+            )
+            return
+
+        db = databaseManager.ForServer(interaction.guild_id)
+        targetMember = member or interaction.guild.get_member(targetUserId)
+        targetLabel = str(targetMember) if targetMember is not None else f"User ID {targetUserId}"
+        summary = db.GetMemberActivitySummary(targetUserId)
+        embed = discord.Embed(
+            title=f"🧾 Member activity · {targetLabel}",
+            description=f"User ID: `{targetUserId}` · Read-only server record summary.",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        if summary["available_credits"] is None:
+            accountText = "No credit account is stored."
+        else:
+            accountText = f"Available credits: **{int(summary['available_credits']):,}**"
+        accountText += f"\nOutstanding debt: **{int(summary['outstanding_debt']):,}**"
+        embed.add_field(name="Credit account", value=accountText, inline=True)
+        embed.add_field(
+            name="Retained activity",
+            value=(
+                f"Transactions: **{int(summary['transaction_count']):,}**\n"
+                f"Tickets: **{int(summary['ticket_count']):,}** "
+                f"(open: **{int(summary['open_ticket_count']):,}**)"
+            ),
+            inline=True,
+        )
+
+        transactionLines = []
+        for row in summary["recent_transactions"]:
+            transactionType = str(row["type"]).replace("_", " ").title()
+            transactionLines.append(
+                f"#{int(row['id'])} · **{transactionType}** · {int(row['amount']):,} credits · {row['created_at']}"
+            )
+        embed.add_field(
+            name="Recent credit transactions",
+            value="\n".join(transactionLines)[:1024] if transactionLines else "No retained credit transactions.",
+            inline=False,
+        )
+
+        ticketLines = []
+        for row in summary["recent_tickets"]:
+            ticketLabel = TicketLabelFromRow(row)
+            line = f"Ticket #{ticketLabel} · **{str(row['status']).title()}** · {row['created_at']}"
+            transcriptChannelId = row["transcript_channel_id"] if "transcript_channel_id" in row.keys() else None
+            transcriptMessageId = row["transcript_message_id"] if "transcript_message_id" in row.keys() else None
+            if transcriptChannelId and transcriptMessageId:
+                line += f" · [Transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
+            ticketLines.append(line)
+        embed.add_field(
+            name="Recent retained tickets",
+            value="\n".join(ticketLines)[:1024] if ticketLines else "No retained ticket history.",
+            inline=False,
+        )
+        embed.set_footer(text="Only the latest 5 transactions and 3 tickets are shown.")
+        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="reports", description="Staff only: browse reports by status, category, and page.")
     @app_commands.guild_only()
     @app_commands.describe(
         page="Page number (5 reports per page; buttons also available)",
         category="Optional report category filter",
+        status="Report status filter (defaults to Open)",
     )
-    @app_commands.choices(category=[
-        app_commands.Choice(name="All categories", value="all"),
-        app_commands.Choice(name="Scam / Fraud", value="scam"),
-        app_commands.Choice(name="Bug / Bot Issue", value="bug"),
-        app_commands.Choice(name="Ticket / Credit Issue", value="ticket_credit"),
-        app_commands.Choice(name="Member Misconduct", value="member_behavior"),
-        app_commands.Choice(name="Other / General Issue", value="other"),
-    ])
+    @app_commands.choices(
+        category=[
+            app_commands.Choice(name="All categories", value="all"),
+            app_commands.Choice(name="Scam / Fraud", value="scam"),
+            app_commands.Choice(name="Bug / Bot Issue", value="bug"),
+            app_commands.Choice(name="Ticket / Credit Issue", value="ticket_credit"),
+            app_commands.Choice(name="Member Misconduct", value="member_behavior"),
+            app_commands.Choice(name="Other / General Issue", value="other"),
+        ],
+        status=[
+            app_commands.Choice(name="Open", value="open"),
+            app_commands.Choice(name="Confirmed", value="confirmed"),
+            app_commands.Choice(name="Dismissed", value="dismissed"),
+            app_commands.Choice(name="All statuses", value="all"),
+        ],
+    )
     async def Reports(
         interaction: discord.Interaction,
         page: app_commands.Range[int, 1, 1000] = 1,
         category: app_commands.Choice[str] | None = None,
+        status: app_commands.Choice[str] | None = None,
     ) -> None:
         if interaction.guild is None or interaction.guild_id is None:
             await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
@@ -1182,29 +1291,37 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             return
 
         db = databaseManager.ForServer(interaction.guild_id)
-        categoryValue = category.value if category else None
+        categoryValue = category.value if category and category.value != "all" else None
         categoryText = category.name if category else "All categories"
+        statusValue = status.value if status else "open"
+        statusLabels = {
+            "open": "Open",
+            "confirmed": "Confirmed",
+            "dismissed": "Dismissed",
+            "all": "All statuses",
+        }
+        statusText = statusLabels.get(statusValue, "Open")
 
         def LoadReportsPage(pageNumber: int) -> tuple[discord.Embed, bool]:
             rows = db.ListScamReports(
-                status="open",
+                status=statusValue,
                 limit=6,
                 reportType=categoryValue,
                 offset=(pageNumber - 1) * 5,
             )
             visibleRows = rows[:5]
             embed = discord.Embed(
-                title=f"📨 Open reports · {categoryText}",
+                title=f"📨 {statusText} reports · {categoryText}",
                 color=discord.Color.blurple(),
                 timestamp=discord.utils.utcnow(),
             )
             embed.set_footer(
-                text=f"Page {pageNumber} · 5 reports per page · Category: {categoryText}"
+                text=f"Page {pageNumber} · 5 reports per page · {statusText} · {categoryText}"
             )
             if not visibleRows:
-                embed.description = "No open reports were found on this page for the selected category."
+                embed.description = f"No {statusText.lower()} reports were found for the selected category."
             else:
-                embed.description = "Use `/report-review` to confirm or dismiss a report after reviewing the available evidence."
+                embed.description = "Use `/report-review` to confirm or dismiss an open report after reviewing the available evidence."
                 categoryLabels = {
                     "scam": "Scam / Fraud",
                     "bug": "Bug / Bot Issue",
