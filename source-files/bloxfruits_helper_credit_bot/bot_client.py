@@ -1330,59 +1330,60 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 embed.description = "Open reports can be reviewed with `/report-review`. Previously reviewed reports include their reviewer and saved note."
             else:
                 embed.description = "These reports have already been reviewed. Their recorded reviewer and note are shown where available."
-                categoryLabels = {
-                    "scam": "Scam / Fraud",
-                    "bug": "Bug / Bot Issue",
-                    "ticket_credit": "Ticket / Credit Issue",
-                    "member_behavior": "Member Misconduct",
-                    "other": "Other / General Issue",
-                }
-                for row in visibleRows:
-                    reportedUserId = int(row["reported_user_id"] or 0)
-                    reportType = str(row["report_type"] if "report_type" in row.keys() else "scam")
-                    categoryLabel = categoryLabels.get(reportType, "Other / General Issue")
-                    relatedTickets = db.ListTicketHistoryForMember(reportedUserId, limit=2) if reportedUserId > 0 else []
-                    relatedLinks = []
-                    for ticketRow in relatedTickets:
-                        ticketLabel = TicketLabelFromRow(ticketRow)
-                        transcriptChannelId = ticketRow["transcript_channel_id"] if "transcript_channel_id" in ticketRow.keys() else None
-                        transcriptMessageId = ticketRow["transcript_message_id"] if "transcript_message_id" in ticketRow.keys() else None
-                        if transcriptChannelId and transcriptMessageId:
-                            relatedLinks.append(
-                                f"[ticket-{ticketLabel} transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
-                            )
-                        elif str(ticketRow["status"]) == "open" and ticketRow["channel_id"]:
-                            relatedLinks.append(
-                                f"[ticket-{ticketLabel} open channel](https://discord.com/channels/{interaction.guild_id}/{int(ticketRow['channel_id'])})"
-                            )
-                    linksText = (
-                        "\n".join(relatedLinks) if relatedLinks
-                        else ("No member was attached to this report." if reportedUserId <= 0
-                              else "No transcript/open ticket links found for this member.")
-                    )
-                    memberText = f"<@{reportedUserId}> (`{reportedUserId}`)" if reportedUserId > 0 else "Not specified"
-                    reportStatus = str(row["status"]).title()
-                    reviewText = ""
-                    if str(row["status"]) != "open":
-                        reviewerId = int(row["reviewed_by"] or 0)
-                        reviewerText = f"<@{reviewerId}> (`{reviewerId}`)" if reviewerId > 0 else "Not recorded"
-                        reviewNote = str(row["review_note"] or "No review note was saved.")
-                        reviewText = (
-                            f"**Reviewed by:** {reviewerText}\n"
-                            f"**Review note:** {reviewNote[:180]}\n"
+
+            categoryLabels = {
+                "scam": "Scam / Fraud",
+                "bug": "Bug / Bot Issue",
+                "ticket_credit": "Ticket / Credit Issue",
+                "member_behavior": "Member Misconduct",
+                "other": "Other / General Issue",
+            }
+            for row in visibleRows:
+                reportedUserId = int(row["reported_user_id"] or 0)
+                reportType = str(row["report_type"] if "report_type" in row.keys() else "scam")
+                categoryLabel = categoryLabels.get(reportType, "Other / General Issue")
+                relatedTickets = db.ListTicketHistoryForMember(reportedUserId, limit=2) if reportedUserId > 0 else []
+                relatedLinks = []
+                for ticketRow in relatedTickets:
+                    ticketLabel = TicketLabelFromRow(ticketRow)
+                    transcriptChannelId = ticketRow["transcript_channel_id"] if "transcript_channel_id" in ticketRow.keys() else None
+                    transcriptMessageId = ticketRow["transcript_message_id"] if "transcript_message_id" in ticketRow.keys() else None
+                    if transcriptChannelId and transcriptMessageId:
+                        relatedLinks.append(
+                            f"[ticket-{ticketLabel} transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
                         )
-                    embed.add_field(
-                        name=f"Report #{int(row['report_id'])} · {reportStatus} · {str(row['created_at'])}",
-                        value=(
-                            f"**Category:** {categoryLabel}\n"
-                            f"**Reported member:** {memberText}\n"
-                            f"**Reporter:** <@{int(row['reporter_user_id'])}> (`{int(row['reporter_user_id'])}`)\n"
-                            f"**Details:** {str(row['details'])[:250]}\n"
-                            f"{reviewText}"
-                            f"**Related history:** {linksText}"
-                        )[:1024],
-                        inline=False,
+                    elif str(ticketRow["status"]) == "open" and ticketRow["channel_id"]:
+                        relatedLinks.append(
+                            f"[ticket-{ticketLabel} open channel](https://discord.com/channels/{interaction.guild_id}/{int(ticketRow['channel_id'])})"
+                        )
+                linksText = (
+                    "\n".join(relatedLinks) if relatedLinks
+                    else ("No member was attached to this report." if reportedUserId <= 0
+                          else "No transcript/open ticket links found for this member.")
+                )
+                memberText = f"<@{reportedUserId}> (`{reportedUserId}`)" if reportedUserId > 0 else "Not specified"
+                reportStatus = str(row["status"]).title()
+                reviewText = ""
+                if str(row["status"]) != "open":
+                    reviewerId = int(row["reviewed_by"] or 0)
+                    reviewerText = f"<@{reviewerId}> (`{reviewerId}`)" if reviewerId > 0 else "Not recorded"
+                    reviewNote = str(row["review_note"] or "No review note was saved.")
+                    reviewText = (
+                        f"**Reviewed by:** {reviewerText}\n"
+                        f"**Review note:** {reviewNote[:180]}\n"
                     )
+                embed.add_field(
+                    name=f"Report #{int(row['report_id'])} · {reportStatus} · {str(row['created_at'])}",
+                    value=(
+                        f"**Category:** {categoryLabel}\n"
+                        f"**Reported member:** {memberText}\n"
+                        f"**Reporter:** <@{int(row['reporter_user_id'])}> (`{int(row['reporter_user_id'])}`)\n"
+                        f"**Details:** {str(row['details'])[:250]}\n"
+                        f"{reviewText}"
+                        f"**Related history:** {linksText}"
+                    )[:1024],
+                    inline=False,
+                )
             return embed, len(rows) > 5
 
         view = EphemeralPaginator(
