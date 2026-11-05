@@ -114,7 +114,7 @@ class ServerAnalyticsTests(unittest.TestCase):
             actorUserId=900001,
             note="Member activity test",
         )
-        self.assertEqual(status, "applied")
+        self.assertEqual(status, "added")
         self.assertEqual(balance, 170)
 
         ticketId = self.db.ReserveTicket(
