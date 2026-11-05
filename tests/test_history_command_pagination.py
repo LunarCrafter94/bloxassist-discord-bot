@@ -52,7 +52,7 @@ class HistoryCommandPaginationWiringTests(unittest.TestCase):
     def test_ticket_history_member_transformer_error_is_actionable(self):
         error_handler = self.botText[self.botText.index("def AppCommandErrorMessage("):]
         error_handler = error_handler[:error_handler.index("\n\ndef IsServerOwner")]
-        self.assertIn('if commandName == "ticket-history":', error_handler)
+        self.assertIn('{"credits", "credit-history", "ticket-history", "member-activity"}', error_handler)
         self.assertIn("use the user_id option with their numeric Discord User ID", error_handler)
 
     def test_ticket_history_accepts_numeric_ids_for_former_members(self):
