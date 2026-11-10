@@ -2,11 +2,9 @@
 
 # BloxAssist
 
-A multi-server Discord bot for Blox Fruits service tickets, helper coordination, and credit management.
-
 ![BloxAssist icon](assets/branding/bot-client_icon.png)
 
-A slash-command Discord bot for multi-server ticket support and credit balances. Each Discord server has isolated data, ticket numbering, services, settings, audit records, and invite-reward event history.
+A slash-command Discord bot for multi-server Blox Fruits service tickets, helper coordination, and credit management. Each Discord server has isolated data, ticket numbering, service catalog, settings, audit records, and invite-reward history.
 
 > **🧪 Beta status and deployment scope (as of November 10, 2026):** BloxAssist is still in beta. It has only been deployed in one small real Discord server and one separate testing server. This is a very limited deployment, not broad production testing across multiple communities or at scale. Automated tests have passed, but they do not replace extensive live testing with different users, permissions, and server configurations. Bugs and edge cases may remain. Test new or changed workflows in a separate server first, keep independent backups, and verify important credit and ticket records rather than relying on the bot as the sole source of truth.
 
