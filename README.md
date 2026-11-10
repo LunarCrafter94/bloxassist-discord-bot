@@ -1,6 +1,8 @@
 ![BloxAssist banner](assets/branding/bot-client_banner.png)
 
-# Blox Fruits Helper Credit Bot
+# BloxAssist
+
+A multi-server Discord bot for Blox Fruits service tickets, helper coordination, and credit management.
 
 ![BloxAssist icon](assets/branding/bot-client_icon.png)
 
@@ -8,7 +10,7 @@ A slash-command Discord bot for multi-server ticket support and credit balances.
 
 > **🧪 Beta status and deployment scope (as of November 10, 2026):** BloxAssist is still in beta. It has only been deployed in one small real Discord server and one separate testing server. This is a very limited deployment, not broad production testing across multiple communities or at scale. Automated tests have passed, but they do not replace extensive live testing with different users, permissions, and server configurations. Bugs and edge cases may remain. Test new or changed workflows in a separate server first, keep independent backups, and verify important credit and ticket records rather than relying on the bot as the sole source of truth.
 
-> **Current source status:** `development/v0.10.0` is the v0.10.0 release candidate and has not yet been published. The published v0.9.0 pre-release remains the latest published version. The v0.10.0 candidate passed 173 automated tests and extensive live acceptance testing in a separate Discord test server on November 10, 2026. See [`docs/release_history.md`](docs/release_history.md), [`docs/changelog-0.9.0.md`](docs/changelog-0.9.0.md), and [`docs/changelog-0.10.0.md`](docs/changelog-0.10.0.md) for release history and changes.
+> **Latest release:** BloxAssist `v0.10.0` is published as a pre-release. It passed 173 automated tests and extensive live acceptance testing in a separate Discord test server on November 10, 2026. BloxAssist remains in beta; its deployment scope is still limited to one small real Discord server and one separate testing server. See [`docs/release_history.md`](docs/release_history.md), [`docs/changelog-0.9.0.md`](docs/changelog-0.9.0.md), and [`docs/changelog-0.10.0.md`](docs/changelog-0.10.0.md) for release history and changes.
 
 ## AI-assisted development disclosure
 
@@ -58,7 +60,7 @@ Before switching a real deployment, stop the bot and place recoverable SQLite da
 4. In a staff-only channel, run `/setup admin_dashboard`. Set an **Audit Log Channel** where the bot can send messages, embed links, attach files, and read message history. This channel receives ticket transcripts, credit movement audit entries, invite reward logs, and general moderation reports.
 5. Run `/setup public_tickets` in the public Help Center channel. Test in a development Discord server before using real balances.
 
-For full environment, permissions, migration, backup, and verification steps, see [`docs/installation_and_operations.md`](docs/installation_and_operations.md). See [`docs/backup_and_restore.md`](docs/backup_and_restore.md) for backup/restore details, [`docs/release_history.md`](docs/release_history.md) for release history, and [`docs/changelog-0.10.0.md`](docs/changelog-0.10.0.md) for the v0.10.0 development changelog.
+For full environment, permissions, migration, backup, and verification steps, see [`docs/installation_and_operations.md`](docs/installation_and_operations.md). See [`docs/backup_and_restore.md`](docs/backup_and_restore.md) for backup/restore details, [`docs/release_history.md`](docs/release_history.md) for release history, and [`docs/changelog-0.10.0.md`](docs/changelog-0.10.0.md) for the v0.10.0 release changelog.
 
 Historical install/changelog files are archived in [`docs/history/releases/historical-installation-and-changelogs.zip`](docs/history/releases/historical-installation-and-changelogs.zip). They are reference material only; use the maintained docs linked above for current instructions.
 
