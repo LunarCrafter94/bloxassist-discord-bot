@@ -103,6 +103,16 @@ async def EditEphemeralOriginalResponse(
     try:
         message = await interaction.edit_original_response(*args, **kwargs)
     except discord.NotFound as error:
+        if getattr(error, "code", None) == 10008:
+            # The ephemeral response may already have been removed by its TTL task
+            # while a slower ticket finalization/transcript-retention pass ran.
+            # Its absence must not turn an already-committed ticket operation into
+            # a reported processing failure.
+            _logger.debug(
+                "Ephemeral original response %s no longer exists; skipping edit.",
+                interaction.id,
+            )
+            return None
         _MarkExpiredInteraction(interaction, "editing the response", error)
         return None
     ScheduleEphemeralOriginalDeletion(interaction)
@@ -115,6 +125,9 @@ async def SendEphemeralResponse(
     """Send an ephemeral original response and remove it after one minute."""
     kwargs.pop("ephemeral", None)
     kwargs.pop("delete_after", None)
+    # discord.py expects MISSING rather than None when no View is attached.
+    if kwargs.get("view") is None:
+        kwargs.pop("view", None)
     if _IsExpiredInteraction(interaction):
         return None
     try:

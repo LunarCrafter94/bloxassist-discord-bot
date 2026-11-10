@@ -2,7 +2,8 @@
 
 Run with the bot stopped and current SQLite databases present in data/servers/.
 DATABASE_BACKEND=postgresql and DATABASE_URL must be configured in
-private-configs/credentials.env. This tool refuses to replace any non-empty target.
+private-configs/credentials.env or the process environment. This tool refuses to
+replace any non-empty target and imports every current v0.10.0 application table.
 """
 from __future__ import annotations
 
@@ -17,10 +18,45 @@ if str(SOURCE_ROOT) not in sys.path:
 
 from bloxfruits_helper_credit_bot.database import DatabaseManager  # noqa: E402
 from bloxfruits_helper_credit_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES, LoadRuntimeSettings  # noqa: E402
+from bloxfruits_helper_credit_bot.ticket_messages import DEFAULT_TICKET_WELCOME_MESSAGE  # noqa: E402
 
-TABLES = ("users", "services", "settings", "invite_events", "tickets", "transactions", "invite_rewards", "scam_reports")
-CORE_TABLES = ("users", "tickets", "transactions", "invite_events", "invite_rewards", "scam_reports")
-DELETE_ORDER = ("invite_rewards", "transactions", "tickets", "invite_events", "scam_reports", "users", "services", "settings")
+TABLES = (
+    "users",
+    "services",
+    "settings",
+    "invite_events",
+    "tickets",
+    "transactions",
+    "transaction_audit_deliveries",
+    "invite_rewards",
+    "credit_debts",
+    "invite_attributions",
+    "scam_reports",
+)
+CORE_TABLES = (
+    "users",
+    "tickets",
+    "transactions",
+    "transaction_audit_deliveries",
+    "invite_events",
+    "invite_rewards",
+    "credit_debts",
+    "invite_attributions",
+    "scam_reports",
+)
+DELETE_ORDER = (
+    "transaction_audit_deliveries",
+    "invite_rewards",
+    "transactions",
+    "tickets",
+    "invite_events",
+    "invite_attributions",
+    "credit_debts",
+    "scam_reports",
+    "users",
+    "services",
+    "settings",
+)
 SERIALS = (("tickets", "ticket_id"), ("transactions", "id"), ("invite_events", "event_id"), ("scam_reports", "report_id"))
 
 
@@ -71,6 +107,10 @@ def assert_target_is_fresh(database) -> None:
         "dashboard_channel_id": "",
         "dashboard_message_id": "",
         "audit_log_channel_id": "",
+        "ticket_welcome_message": DEFAULT_TICKET_WELCOME_MESSAGE,
+        "next_ticket_channel_number": "1",
+        "next_ticket_sequence": "1",
+        "invite_leave_penalty_repeat_on_rejoin": "false",
     }
     if settings != expected_settings:
         raise RuntimeError(

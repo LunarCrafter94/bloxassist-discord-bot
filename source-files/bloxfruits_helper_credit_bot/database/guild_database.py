@@ -246,6 +246,8 @@ class GuildDatabase:
                 inviter_user_id INTEGER NOT NULL,
                 invite_code TEXT NOT NULL DEFAULT '',
                 penalty_applied INTEGER NOT NULL DEFAULT 0 CHECK (penalty_applied IN (0, 1)),
+                join_cycle INTEGER NOT NULL DEFAULT 1,
+                joined_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """,
@@ -283,6 +285,25 @@ class GuildDatabase:
                 self.connection.execute(
                     "ALTER TABLE scam_reports ADD COLUMN report_type TEXT NOT NULL DEFAULT 'scam'"
                 )
+
+            # Track attributed invite join cycles so optional repeat leave penalties
+            # can re-arm once per distinct Discord join timestamp.
+            if self.backend == "sqlite":
+                attributionColumnRows = self.connection.execute("PRAGMA table_info(invite_attributions)").fetchall()
+                attributionColumns = {str(row["name"]) for row in attributionColumnRows}
+            else:
+                attributionColumnRows = self.connection.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?",
+                    ("invite_attributions",),
+                ).fetchall()
+                attributionColumns = {str(row["column_name"]) for row in attributionColumnRows}
+            attributionMigrations = {
+                "join_cycle": "ALTER TABLE invite_attributions ADD COLUMN join_cycle INTEGER NOT NULL DEFAULT 1",
+                "joined_at": "ALTER TABLE invite_attributions ADD COLUMN joined_at TEXT NOT NULL DEFAULT ''",
+            }
+            for columnName, migrationSql in attributionMigrations.items():
+                if columnName not in attributionColumns:
+                    self.connection.execute(migrationSql)
 
             # Add the numbered-ticket column to databases created before this feature.
             if self.backend == "sqlite":
@@ -471,6 +492,7 @@ class GuildDatabase:
                 "dashboard_message_id": "",
                 "audit_log_channel_id": "",
                 "ticket_welcome_message": DEFAULT_TICKET_WELCOME_MESSAGE,
+                "invite_leave_penalty_repeat_on_rejoin": "false",
             }
             for settingKey, settingValue in settingDefaults.items():
                 self.connection.execute(
@@ -628,36 +650,167 @@ class GuildDatabase:
                 self.connection.rollback()
                 raise
 
-    def RecordInviteAttribution(self, invitedUserId: int, inviterUserId: int, inviteCode: str) -> bool:
-        """Remember who invited a member, independently of whether an invite event is active."""
+    def RecordInviteAttribution(
+        self,
+        invitedUserId: int,
+        inviterUserId: int,
+        inviteCode: str,
+        *,
+        repeatOnRejoin: bool = False,
+        joinedAt: str | None = None,
+    ) -> bool:
+        """Remember the inviter and, optionally, re-arm one penalty per distinct join cycle.
+
+        The Discord member's joined_at timestamp identifies a join cycle. Repeated
+        delivery of the same join event therefore cannot re-arm an already-used
+        penalty. The default mode preserves the historical one-penalty-per-member
+        behavior for existing servers.
+        """
         invitedId, inviterId = int(invitedUserId), int(inviterUserId)
         if invitedId <= 0 or inviterId <= 0 or invitedId == inviterId:
             return False
+        joinedAtText = str(joinedAt or "").strip()[:80]
         with self.databaseLock:
-            cursor = self.connection.execute(
-                """INSERT INTO invite_attributions(invited_user_id, inviter_user_id, invite_code)
-                   VALUES (?, ?, ?) ON CONFLICT(invited_user_id) DO NOTHING""",
-                (invitedId, inviterId, str(inviteCode)[:100]),
-            )
-            return cursor.rowcount == 1
+            try:
+                self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
+                cursor = self.connection.execute(
+                    """INSERT INTO invite_attributions
+                       (invited_user_id, inviter_user_id, invite_code, join_cycle, joined_at)
+                       VALUES (?, ?, ?, 1, ?)
+                       ON CONFLICT(invited_user_id) DO NOTHING""",
+                    (invitedId, inviterId, str(inviteCode)[:100], joinedAtText),
+                )
+                inserted = cursor.rowcount == 1
 
-    def GetInviteAttribution(self, invitedUserId: int):
+                lockSql = "SELECT join_cycle, joined_at FROM invite_attributions WHERE invited_user_id = ?"
+                if self.backend == "postgresql":
+                    lockSql += " FOR UPDATE"
+                current = self.connection.execute(lockSql, (invitedId,)).fetchone()
+                if current is not None and str(current["joined_at"] or "") != joinedAtText:
+                    if repeatOnRejoin:
+                        self.connection.execute(
+                            """UPDATE invite_attributions
+                               SET inviter_user_id = ?, invite_code = ?, penalty_applied = 0,
+                                   join_cycle = join_cycle + 1, joined_at = ?
+                               WHERE invited_user_id = ?""",
+                            (inviterId, str(inviteCode)[:100], joinedAtText, invitedId),
+                        )
+                        inserted = True
+                    else:
+                        # Even in once-per-member mode, track the current join timestamp
+                        # without resetting penalty_applied or changing the original inviter.
+                        self.connection.execute(
+                            "UPDATE invite_attributions SET joined_at = ? WHERE invited_user_id = ?",
+                            (joinedAtText, invitedId),
+                        )
+
+                self.connection.commit()
+                return inserted
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def GetInviteAttribution(self, invitedUserId: int, *, joinedAt: str | None = None):
+        if joinedAt is None:
+            return self.Execute(
+                "SELECT * FROM invite_attributions WHERE invited_user_id = ? AND penalty_applied = 0",
+                (int(invitedUserId),), fetchOne=True,
+            )
+        # Empty timestamps belong to legacy rows created before join-cycle tracking.
+        # They remain eligible for their one outstanding legacy penalty. A timestamped
+        # row must match the member object from this exact Discord leave event, so a
+        # delayed old leave event cannot penalize a newer rejoin cycle.
         return self.Execute(
-            "SELECT * FROM invite_attributions WHERE invited_user_id = ? AND penalty_applied = 0",
-            (int(invitedUserId),), fetchOne=True,
+            "SELECT * FROM invite_attributions "
+            "WHERE invited_user_id = ? AND penalty_applied = 0 AND (joined_at = ? OR joined_at = '')",
+            (int(invitedUserId), str(joinedAt)[:80]), fetchOne=True,
         )
 
-    def MarkInviteLeavePenaltyApplied(self, invitedUserId: int) -> bool:
+    def MarkInviteLeavePenaltyApplied(self, invitedUserId: int, joinCycle: int | None = None) -> bool:
         with self.databaseLock:
-            cursor = self.connection.execute(
-                "UPDATE invite_attributions SET penalty_applied = 1 WHERE invited_user_id = ? AND penalty_applied = 0",
-                (int(invitedUserId),),
-            )
-            return cursor.rowcount == 1
+            try:
+                if joinCycle is None:
+                    cursor = self.connection.execute(
+                        "UPDATE invite_attributions SET penalty_applied = 1 WHERE invited_user_id = ? AND penalty_applied = 0",
+                        (int(invitedUserId),),
+                    )
+                else:
+                    cursor = self.connection.execute(
+                        "UPDATE invite_attributions SET penalty_applied = 1 "
+                        "WHERE invited_user_id = ? AND join_cycle = ? AND penalty_applied = 0",
+                        (int(invitedUserId), int(joinCycle)),
+                    )
+                self.connection.commit()
+                return cursor.rowcount == 1
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def GetCreditDebt(self, userId: int) -> int:
         row = self.Execute("SELECT amount FROM credit_debts WHERE user_id = ?", (int(userId),), fetchOne=True)
         return int(row["amount"] or 0) if row else 0
+
+    def ListCreditTransactions(self, userId: int, *, limit: int = 10, offset: int = 0):
+        """Return recent ledger entries involving one member, newest first."""
+        normalizedLimit = max(1, min(int(limit), 100))
+        normalizedOffset = max(0, int(offset))
+        return self.Execute(
+            """SELECT id, ticket_id, from_user, to_user, amount, type,
+                      actor_user_id, note, created_at
+               FROM transactions
+               WHERE from_user = ? OR to_user = ?
+               ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (int(userId), int(userId), normalizedLimit, normalizedOffset),
+            fetchAll=True,
+        )
+
+    def _ApplyRewardAgainstDebtWithinTransaction(
+        self,
+        userId: int,
+        amount: int,
+        *,
+        actorUserId: int | None = None,
+        sourceNote: str,
+        ticketId: int | None = None,
+    ) -> tuple[int, int]:
+        """Apply earned credits to debt first; caller owns the active transaction."""
+        normalizedUserId = int(userId)
+        normalizedAmount = int(amount)
+        if normalizedAmount < 0:
+            raise ValueError("Reward amount cannot be negative.")
+        self._EnsureUserWithinTransaction(normalizedUserId, self.GetDefaultJoinCredits())
+        userLockSql = "SELECT credits FROM users WHERE user_id = ?"
+        if self.backend == "postgresql":
+            userLockSql += " FOR UPDATE"
+        self.connection.execute(userLockSql, (normalizedUserId,)).fetchone()
+        debtRow = self.connection.execute(
+            "SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedUserId,)
+        ).fetchone()
+        currentDebt = int(debtRow["amount"]) if debtRow else 0
+        repayment = min(currentDebt, normalizedAmount)
+        remainingDebt = currentDebt - repayment
+        availableCredit = normalizedAmount - repayment
+        if repayment:
+            self.connection.execute(
+                "UPDATE credit_debts SET amount = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                (remainingDebt, normalizedUserId),
+            )
+            self.connection.execute(
+                """INSERT INTO transactions
+                   (ticket_id, from_user, to_user, amount, type, actor_user_id, note)
+                   VALUES (?, ?, NULL, ?, 'debt_repayment', ?, ?)""",
+                (int(ticketId) if ticketId is not None else None, normalizedUserId,
+                 repayment, int(actorUserId) if actorUserId is not None else None,
+                 ("Automatic debt offset: " + str(sourceNote).strip())[:500]),
+            )
+        self.connection.execute(
+            "UPDATE users SET credits = credits + ? WHERE user_id = ?",
+            (availableCredit, normalizedUserId),
+        )
+        balanceRow = self.connection.execute(
+            "SELECT credits FROM users WHERE user_id = ?", (normalizedUserId,)
+        ).fetchone()
+        return int(balanceRow["credits"]), remainingDebt
 
     def ApplyPenaltyDebt(self, userId: int, amount: int, *, actorUserId: int, reason: str, idempotencyKey: str | None = None) -> tuple[str, int | None, int]:
         """Apply an audited penalty, using available credits before recording unpaid debt."""
@@ -681,7 +834,23 @@ class GuildDatabase:
                         self.connection.rollback()
                         return ("duplicate" if same else "idempotency_conflict"), balance, debt
                 self._EnsureUserWithinTransaction(targetId, self.GetDefaultJoinCredits())
-                userRow = self.connection.execute("SELECT credits FROM users WHERE user_id = ?", (targetId,)).fetchone()
+                userLockSql = "SELECT credits FROM users WHERE user_id = ?"
+                if self.backend == "postgresql":
+                    userLockSql += " FOR UPDATE"
+                userRow = self.connection.execute(userLockSql, (targetId,)).fetchone()
+                if key:
+                    prior = self.connection.execute(
+                        "SELECT * FROM transactions WHERE idempotency_key = ?", (key,)
+                    ).fetchone()
+                    if prior is not None:
+                        same = str(prior["type"]) == "penalty_debt" and int(prior["amount"]) == penalty and prior["to_user"] == targetId and prior["actor_user_id"] == actorId
+                        debtRow = self.connection.execute(
+                            "SELECT amount FROM credit_debts WHERE user_id = ?", (targetId,)
+                        ).fetchone()
+                        debt = int(debtRow["amount"]) if debtRow else 0
+                        balance = int(userRow["credits"])
+                        self.connection.rollback()
+                        return ("duplicate" if same else "idempotency_conflict"), balance, debt
                 credits = int(userRow["credits"])
                 debtRow = self.connection.execute("SELECT amount FROM credit_debts WHERE user_id = ?", (targetId,)).fetchone()
                 oldDebt = int(debtRow["amount"]) if debtRow else 0
@@ -699,6 +868,109 @@ class GuildDatabase:
                 )
                 self.connection.commit()
                 return "penalized", newCredits, newDebt
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def RepayCreditDebt(
+        self,
+        userId: int,
+        amount: int,
+        *,
+        idempotencyKey: str | None = None,
+    ) -> tuple[str, int | None, int]:
+        """Use a member's available credits to repay outstanding debt atomically.
+
+        The repayment is recorded as its own immutable transaction row. A
+        repeated interaction ID cannot deduct credits or reduce debt twice.
+        Returns (status, current_balance, remaining_debt).
+        """
+        if isinstance(amount, bool):
+            raise ValueError("Repayment amount must be a positive integer.")
+        try:
+            normalizedAmount = int(amount)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Repayment amount must be a positive integer.") from error
+        if normalizedAmount <= 0 or normalizedAmount > 1_000_000_000:
+            raise ValueError("Repayment amount must be between 1 and 1,000,000,000 credits.")
+
+        normalizedUserId = int(userId)
+        normalizedKey = str(idempotencyKey).strip() if idempotencyKey is not None else None
+        if normalizedKey == "":
+            normalizedKey = None
+        if normalizedKey is not None and len(normalizedKey) > 200:
+            raise ValueError("idempotencyKey must be 200 characters or fewer.")
+
+        with self.databaseLock:
+            self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
+            try:
+                self._EnsureUserWithinTransaction(normalizedUserId, self.GetDefaultJoinCredits())
+                balanceSql = "SELECT credits FROM users WHERE user_id = ?"
+                if self.backend == "postgresql":
+                    balanceSql += " FOR UPDATE"
+                balanceRow = self.connection.execute(balanceSql, (normalizedUserId,)).fetchone()
+                if normalizedKey is not None:
+                    existing = self.connection.execute(
+                        "SELECT * FROM transactions WHERE idempotency_key = ?",
+                        (normalizedKey,),
+                    ).fetchone()
+                    if existing is not None:
+                        sameOperation = (
+                            str(existing["type"]) == "debt_repayment"
+                            and int(existing["amount"]) == normalizedAmount
+                            and existing["from_user"] == normalizedUserId
+                            and existing["to_user"] is None
+                            and existing["actor_user_id"] == normalizedUserId
+                        )
+                        debtRow = self.connection.execute(
+                            "SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedUserId,)
+                        ).fetchone()
+                        balance = int(balanceRow["credits"]) if balanceRow else None
+                        debt = int(debtRow["amount"]) if debtRow else 0
+                        self.connection.rollback()
+                        return ("duplicate" if sameOperation else "idempotency_conflict"), balance, debt
+                debtRow = self.connection.execute(
+                    "SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedUserId,)
+                ).fetchone()
+                balance = int(balanceRow["credits"])
+                debt = int(debtRow["amount"]) if debtRow else 0
+
+                if debt <= 0:
+                    self.connection.rollback()
+                    return "no_debt", balance, 0
+                if balance < normalizedAmount:
+                    self.connection.rollback()
+                    return "insufficient_credits", balance, debt
+                if normalizedAmount > debt:
+                    self.connection.rollback()
+                    return "exceeds_debt", balance, debt
+
+                cursor = self.connection.execute(
+                    "UPDATE users SET credits = credits - ? WHERE user_id = ? AND credits >= ?",
+                    (normalizedAmount, normalizedUserId, normalizedAmount),
+                )
+                if cursor.rowcount != 1:
+                    self.connection.rollback()
+                    return "insufficient_credits", balance, debt
+
+                remainingDebt = debt - normalizedAmount
+                self.connection.execute(
+                    "UPDATE credit_debts SET amount = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                    (remainingDebt, normalizedUserId),
+                )
+                self.connection.execute(
+                    """INSERT INTO transactions
+                       (ticket_id, from_user, to_user, amount, type, actor_user_id, note, idempotency_key)
+                       VALUES (NULL, ?, NULL, ?, 'debt_repayment', ?, ?, ?)""",
+                    (normalizedUserId, normalizedAmount, normalizedUserId,
+                     "Member-initiated debt repayment", normalizedKey),
+                )
+                newBalanceRow = self.connection.execute(
+                    "SELECT credits FROM users WHERE user_id = ?", (normalizedUserId,)
+                ).fetchone()
+                newBalance = int(newBalanceRow["credits"])
+                self.connection.commit()
+                return "repaid", newBalance, remainingDebt
             except Exception:
                 self.connection.rollback()
                 raise
@@ -1009,14 +1281,10 @@ class GuildDatabase:
                 self._EnsureUserWithinTransaction(normalizedCreatorId, defaultCredits)
                 for helperId in helpers:
                     self._EnsureUserWithinTransaction(helperId, defaultCredits)
+                # Requesters must clear debt before reserving a new ticket.
+                # Indebted members may still help; their earned reward is applied
+                # to outstanding debt first by _ApplyRewardAgainstDebtWithinTransaction.
                 debtRow = self.connection.execute("SELECT amount FROM credit_debts WHERE user_id = ?", (normalizedCreatorId,)).fetchone()
-                debtorHelper = self.connection.execute(
-                    "SELECT user_id FROM credit_debts WHERE amount > 0 AND user_id IN (" + ",".join("?" for _ in helpers) + ")",
-                    tuple(helpers),
-                ).fetchone()
-                if debtorHelper is not None:
-                    self.connection.rollback()
-                    return None
                 if debtRow is not None and int(debtRow["amount"] or 0) > 0:
                     self.connection.rollback()
                     return None
@@ -1759,10 +2027,10 @@ class GuildDatabase:
                     ]
 
                 for helperId, payoutAmount in payouts:
-                    self._EnsureUserWithinTransaction(helperId, defaultCredits)
-                    self.connection.execute(
-                        "UPDATE users SET credits = credits + ? WHERE user_id = ?",
-                        (payoutAmount, helperId),
+                    self._ApplyRewardAgainstDebtWithinTransaction(
+                        helperId, payoutAmount, actorUserId=actorUserId,
+                        sourceNote=f"ticket reward for ticket {normalizedTicketId}",
+                        ticketId=normalizedTicketId,
                     )
                     self.connection.execute(
                         """INSERT INTO transactions
@@ -1937,9 +2205,112 @@ class GuildDatabase:
                 self.connection.rollback()
                 raise
 
-    def ListTicketHistoryForMember(self, userId: int, limit: int = 10) -> list[sqlite3.Row]:
+    def GetServerStatistics(self) -> dict[str, Any]:
+        """Return read-only aggregate metrics for the current server."""
+        memberRow = self.Execute(
+            """SELECT COUNT(*) AS tracked_members,
+                      COALESCE(SUM(credits), 0) AS available_credits
+               FROM users""",
+            fetchOne=True,
+        )
+        debtRow = self.Execute(
+            """SELECT COUNT(*) AS debtors,
+                      COALESCE(SUM(amount), 0) AS outstanding_debt
+               FROM credit_debts
+               WHERE amount > 0""",
+            fetchOne=True,
+        )
+        ticketRows = self.Execute(
+            "SELECT status, COUNT(*) AS amount FROM tickets GROUP BY status",
+            fetchAll=True,
+        )
+        reportRows = self.Execute(
+            "SELECT status, COUNT(*) AS amount FROM scam_reports GROUP BY status",
+            fetchAll=True,
+        )
+        ledgerRow = self.Execute(
+            "SELECT COUNT(*) AS amount FROM transactions",
+            fetchOne=True,
+        )
+        inviteRewardRow = self.Execute(
+            """SELECT COUNT(*) AS amount,
+                      COALESCE(SUM(reward_credits), 0) AS credits
+               FROM invite_rewards""",
+            fetchOne=True,
+        )
+        serviceRow = self.Execute(
+            "SELECT COUNT(*) AS amount FROM services WHERE active = 1",
+            fetchOne=True,
+        )
+        return {
+            "tracked_members": int(memberRow["tracked_members"] or 0),
+            "available_credits": int(memberRow["available_credits"] or 0),
+            "debtors": int(debtRow["debtors"] or 0),
+            "outstanding_debt": int(debtRow["outstanding_debt"] or 0),
+            "ticket_statuses": {
+                str(row["status"]): int(row["amount"]) for row in ticketRows
+            },
+            "report_statuses": {
+                str(row["status"]): int(row["amount"]) for row in reportRows
+            },
+            "ledger_entries": int(ledgerRow["amount"] or 0),
+            "invite_reward_count": int(inviteRewardRow["amount"] or 0),
+            "invite_reward_credits": int(inviteRewardRow["credits"] or 0),
+            "enabled_services": int(serviceRow["amount"] or 0),
+            "active_invite_event": self.GetActiveInviteEvent() is not None,
+        }
+
+    def GetMemberActivitySummary(
+        self,
+        userId: int,
+        *,
+        recentTransactionLimit: int = 5,
+        recentTicketLimit: int = 3,
+    ) -> dict[str, Any]:
+        """Return read-only member balances and retained activity without creating an account."""
+        normalizedId = int(userId)
+        token = str(normalizedId)
+        ticketConditions = """creator_id = ?
+            OR (',' || helper_ids || ',') LIKE ('%%,' || ? || ',%%')
+            OR (',' || active_helper_ids || ',') LIKE ('%%,' || ? || ',%%')
+            OR (',' || replacement_candidate_ids || ',') LIKE ('%%,' || ? || ',%%')"""
+        ticketCounts = self.Execute(
+            f"""SELECT COUNT(*) AS total_tickets,
+                       COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0) AS open_tickets
+                FROM tickets
+                WHERE {ticketConditions}""",
+            (normalizedId, token, token, token),
+            fetchOne=True,
+        )
+        transactionCount = self.Execute(
+            "SELECT COUNT(*) AS amount FROM transactions WHERE from_user = ? OR to_user = ?",
+            (normalizedId, normalizedId),
+            fetchOne=True,
+        )
+        account = self.GetUser(normalizedId)
+        return {
+            "user_id": normalizedId,
+            "account": account,
+            "available_credits": int(account["credits"]) if account is not None else None,
+            "outstanding_debt": self.GetCreditDebt(normalizedId),
+            "transaction_count": int(transactionCount["amount"] or 0),
+            "ticket_count": int(ticketCounts["total_tickets"] or 0),
+            "open_ticket_count": int(ticketCounts["open_tickets"] or 0),
+            "recent_transactions": self.ListCreditTransactions(
+                normalizedId, limit=max(1, min(10, int(recentTransactionLimit)))
+            ),
+            "recent_tickets": self.ListTicketHistoryForMember(
+                normalizedId, limit=max(1, min(10, int(recentTicketLimit)))
+            ),
+        }
+
+    def ListTicketHistoryForMember(
+        self, userId: int, limit: int = 10, *, offset: int = 0
+    ) -> list[sqlite3.Row]:
+        """Return newest-first retained ticket history with bounded pagination."""
         normalizedId = int(userId)
         safeLimit = max(1, min(25, int(limit)))
+        safeOffset = max(0, int(offset))
         token = str(normalizedId)
         return self.Execute(
             """SELECT * FROM tickets
@@ -1947,8 +2318,8 @@ class GuildDatabase:
                   OR (',' || helper_ids || ',') LIKE ('%%,' || ? || ',%%')
                   OR (',' || active_helper_ids || ',') LIKE ('%%,' || ? || ',%%')
                   OR (',' || replacement_candidate_ids || ',') LIKE ('%%,' || ? || ',%%')
-               ORDER BY ticket_id DESC LIMIT ?""",
-            (normalizedId, token, token, token, safeLimit), fetchAll=True,
+               ORDER BY ticket_id DESC LIMIT ? OFFSET ?""",
+            (normalizedId, token, token, token, safeLimit, safeOffset), fetchAll=True,
         )
 
     def CreateScamReport(
@@ -1988,16 +2359,26 @@ class GuildDatabase:
             self.connection.commit()
             return reportId
 
-    def ListScamReports(self, *, status: str | None = "open", limit: int = 10):
+    def ListScamReports(
+        self, *, status: str | None = "open", limit: int = 10,
+        reportType: str | None = None, offset: int = 0,
+    ):
+        """List reports with bounded pagination and an optional category filter."""
         safeLimit = max(1, min(25, int(limit)))
-        if status is None or status == "all":
-            return self.Execute(
-                "SELECT * FROM scam_reports ORDER BY report_id DESC LIMIT ?",
-                (safeLimit,), fetchAll=True,
-            )
+        safeOffset = max(0, int(offset))
+        conditions = []
+        parameters = []
+        if status is not None and status != "all":
+            conditions.append("status = ?")
+            parameters.append(str(status))
+        if reportType is not None and reportType != "all":
+            conditions.append("report_type = ?")
+            parameters.append(str(reportType))
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        parameters.extend((safeLimit, safeOffset))
         return self.Execute(
-            "SELECT * FROM scam_reports WHERE status = ? ORDER BY report_id DESC LIMIT ?",
-            (str(status), safeLimit), fetchAll=True,
+            f"SELECT * FROM scam_reports{where} ORDER BY report_id DESC LIMIT ? OFFSET ?",
+            tuple(parameters), fetchAll=True,
         )
 
     def ResolveScamReport(self, reportId: int, reviewedBy: int, decision: str, note: str = "") -> bool:
@@ -2131,9 +2512,9 @@ class GuildDatabase:
                 if cursor.rowcount != 1:
                     self.connection.rollback()
                     return "duplicate", None, reward
-                self.connection.execute(
-                    "UPDATE users SET credits = credits + ? WHERE user_id = ?",
-                    (reward, int(inviterUserId)),
+                self._ApplyRewardAgainstDebtWithinTransaction(
+                    int(inviterUserId), reward,
+                    sourceNote=f"invite event #{int(eventId)} reward",
                 )
                 self.connection.execute(
                     """INSERT INTO transactions(ticket_id, from_user, to_user, amount, type, actor_user_id, note)

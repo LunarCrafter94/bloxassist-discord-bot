@@ -313,6 +313,180 @@ class PerGuildDatabaseTests(unittest.TestCase):
         newTicket = self.guildA.GetTicketById(newTicketId)
         self.assertEqual(TicketLabelFromRow(newTicket), "004")
 
+    def testRecordInviteAttributionCommitsBeforeInviteRewardTransaction(self):
+        status, eventId, _ = self.guildA.StartInviteEvent(75, 60, startedBy=1234)
+        self.assertEqual(status, "started")
+        self.assertTrue(self.guildA.RecordInviteAttribution(22011, 22012, "invite-code"))
+        self.assertFalse(self.guildA.connection.in_transaction)
+
+        result = self.guildA.AwardInviteReward(
+            eventId, invitedUserId=22011, inviterUserId=22012, inviteCode="invite-code"
+        )
+        self.assertEqual(result[0], "awarded")
+        self.assertEqual(result[1], 175)
+        self.assertFalse(self.guildA.connection.in_transaction)
+
+    def testMarkInviteLeavePenaltyAppliedCommitsBeforeNextTransaction(self):
+        self.guildA.Execute(
+            "INSERT INTO invite_attributions(invited_user_id, inviter_user_id, invite_code) VALUES (?, ?, ?)",
+            (22111, 22112, "leave-code"),
+        )
+        self.assertTrue(self.guildA.MarkInviteLeavePenaltyApplied(22111))
+        self.assertFalse(self.guildA.connection.in_transaction)
+
+        status, balance, debt = self.guildA.ApplyPenaltyDebt(
+            22112, 125, actorUserId=1234, reason="leave penalty QA"
+        )
+        self.assertEqual((status, balance, debt), ("penalized", 0, 25))
+        self.assertFalse(self.guildA.connection.in_transaction)
+
+    def testLegacyInviteAttributionWithoutJoinTimestampRemainsEligible(self):
+        invitedId, inviterId = 22115, 22116
+        self.guildA.Execute(
+            "INSERT INTO invite_attributions(invited_user_id, inviter_user_id, invite_code) VALUES (?, ?, ?)",
+            (invitedId, inviterId, "legacy-code"),
+        )
+        attribution = self.guildA.GetInviteAttribution(
+            invitedId, joinedAt="2026-11-04T12:00:00+00:00"
+        )
+        self.assertIsNotNone(attribution)
+        self.assertEqual(int(attribution["join_cycle"]), 1)
+        self.assertEqual(str(attribution["joined_at"]), "")
+
+    def testInviteLeavePenaltyCanRepeatOncePerDistinctRejoinCycle(self):
+        invitedId, inviterId = 22121, 22122
+        self.guildA.CreateUser(inviterId, credits=0)
+        firstJoin = "2026-11-04T10:00:00+00:00"
+        secondJoin = "2026-11-04T11:00:00+00:00"
+
+        self.assertTrue(self.guildA.RecordInviteAttribution(
+            invitedId, inviterId, "repeat-code",
+            repeatOnRejoin=True, joinedAt=firstJoin,
+        ))
+        firstAttribution = self.guildA.GetInviteAttribution(invitedId)
+        self.assertEqual(int(firstAttribution["join_cycle"]), 1)
+
+        firstKey = f"invite-leave-penalty:111111111111111111:{invitedId}"
+        firstPenalty = self.guildA.ApplyPenaltyDebt(
+            inviterId, 50, actorUserId=1234, reason="first leave",
+            idempotencyKey=firstKey,
+        )
+        self.assertEqual(firstPenalty, ("penalized", 0, 50))
+        self.assertTrue(self.guildA.MarkInviteLeavePenaltyApplied(invitedId, joinCycle=1))
+
+        # Duplicate delivery of the same Discord join timestamp cannot re-arm
+        # the penalty, and replaying the same leave-cycle key cannot charge twice.
+        self.assertFalse(self.guildA.RecordInviteAttribution(
+            invitedId, inviterId, "repeat-code",
+            repeatOnRejoin=True, joinedAt=firstJoin,
+        ))
+        self.assertIsNone(self.guildA.GetInviteAttribution(invitedId))
+        duplicatePenalty = self.guildA.ApplyPenaltyDebt(
+            inviterId, 50, actorUserId=1234, reason="duplicate first leave",
+            idempotencyKey=firstKey,
+        )
+        self.assertEqual(duplicatePenalty, ("duplicate", 0, 50))
+        self.assertEqual(self.guildA.GetCreditDebt(inviterId), 50)
+
+        # A distinct rejoin starts cycle 2 and re-arms exactly one new penalty.
+        self.assertTrue(self.guildA.RecordInviteAttribution(
+            invitedId, inviterId, "repeat-code",
+            repeatOnRejoin=True, joinedAt=secondJoin,
+        ))
+        secondAttribution = self.guildA.GetInviteAttribution(invitedId)
+        self.assertEqual(int(secondAttribution["join_cycle"]), 2)
+        self.assertEqual(int(secondAttribution["penalty_applied"]), 0)
+
+        secondKey = f"invite-leave-penalty:111111111111111111:{invitedId}:2"
+        secondPenalty = self.guildA.ApplyPenaltyDebt(
+            inviterId, 50, actorUserId=1234, reason="second leave",
+            idempotencyKey=secondKey,
+        )
+        self.assertEqual(secondPenalty, ("penalized", 0, 100))
+        self.assertTrue(self.guildA.MarkInviteLeavePenaltyApplied(invitedId, joinCycle=2))
+        self.assertEqual(self.guildA.GetCreditDebt(inviterId), 100)
+
+        penaltyRows = self.guildA.Execute(
+            "SELECT idempotency_key FROM transactions WHERE type = 'penalty_debt' AND to_user = ? ORDER BY id",
+            (inviterId,), fetchAll=True,
+        )
+        self.assertEqual([row["idempotency_key"] for row in penaltyRows], [firstKey, secondKey])
+
+    def testInviteLeavePenaltyDoesNotRearmWhenRepeatSettingIsDisabled(self):
+        invitedId, inviterId = 22131, 22132
+        firstJoin = "2026-11-04T10:00:00+00:00"
+        secondJoin = "2026-11-04T11:00:00+00:00"
+        self.assertTrue(self.guildA.RecordInviteAttribution(
+            invitedId, inviterId, "once-code",
+            repeatOnRejoin=False, joinedAt=firstJoin,
+        ))
+        self.assertTrue(self.guildA.MarkInviteLeavePenaltyApplied(invitedId, joinCycle=1))
+
+        self.assertFalse(self.guildA.RecordInviteAttribution(
+            invitedId, inviterId, "once-code",
+            repeatOnRejoin=False, joinedAt=secondJoin,
+        ))
+        self.assertIsNone(self.guildA.GetInviteAttribution(invitedId))
+        stored = self.guildA.Execute(
+            "SELECT join_cycle, joined_at, penalty_applied FROM invite_attributions WHERE invited_user_id = ?",
+            (invitedId,), fetchOne=True,
+        )
+        self.assertEqual(
+            (int(stored["join_cycle"]), str(stored["joined_at"]), int(stored["penalty_applied"])),
+            (1, secondJoin, 1),
+        )
+
+    def testLateLeaveHandlerCannotMarkANewerJoinCycleAsPenalized(self):
+        invitedId, inviterId = 22141, 22142
+        self.guildA.RecordInviteAttribution(
+            invitedId, inviterId, "cycle-code",
+            repeatOnRejoin=True, joinedAt="2026-11-04T10:00:00+00:00",
+        )
+        self.guildA.RecordInviteAttribution(
+            invitedId, inviterId, "cycle-code",
+            repeatOnRejoin=True, joinedAt="2026-11-04T11:00:00+00:00",
+        )
+        self.assertIsNone(
+            self.guildA.GetInviteAttribution(
+                invitedId, joinedAt="2026-11-04T10:00:00+00:00"
+            )
+        )
+        self.assertFalse(self.guildA.MarkInviteLeavePenaltyApplied(invitedId, joinCycle=1))
+        current = self.guildA.GetInviteAttribution(
+            invitedId, joinedAt="2026-11-04T11:00:00+00:00"
+        )
+        self.assertEqual(int(current["join_cycle"]), 2)
+        self.assertEqual(int(current["penalty_applied"]), 0)
+
+    def testLegacyInviteAttributionTableGainsJoinCycleColumnsOnUpgrade(self):
+        dataDir = self.databaseManager.dataDir
+        databasePath = self.guildA.databasePath
+        self.databaseManager.CloseAll()
+
+        connection = sqlite3.connect(databasePath)
+        try:
+            connection.execute("ALTER TABLE invite_attributions DROP COLUMN joined_at")
+            connection.execute("ALTER TABLE invite_attributions DROP COLUMN join_cycle")
+            connection.commit()
+        finally:
+            # sqlite3.Connection's context manager commits/rolls back but does not
+            # close the connection. Explicitly close it so Windows can clean up the
+            # temporary database directory during unittest tearDown.
+            connection.close()
+
+        self.databaseManager = DatabaseManager(
+            dataDir,
+            defaultJoinCredits=DEFAULT_JOIN_CREDITS,
+            defaultServices=DEFAULT_SERVICES,
+        )
+        self.guildA = self.databaseManager.ForServer(111111111111111111)
+        columns = {
+            str(row["name"])
+            for row in self.guildA.Execute("PRAGMA table_info(invite_attributions)", fetchAll=True)
+        }
+        self.assertIn("join_cycle", columns)
+        self.assertIn("joined_at", columns)
+
     def testInviteRewardEventsAreTimedAndAwardInviterOnce(self):
         status, eventId, endsAt = self.guildA.StartInviteEvent(75, 60, startedBy=1234)
         self.assertEqual(status, "started")

@@ -445,6 +445,11 @@ class ReportScamModal(discord.ui.Modal, title="Submit a Report"):
             )
 
 
+async def _DeleteTranscriptMessage(message: discord.Message) -> None:
+    """Delete a saved transcript post using the supported Message.delete API."""
+    await message.delete()
+
+
 async def PublishTicketTranscript(
     channel: discord.TextChannel, databaseManager: DatabaseManager, ticketId: int, finalStatus: str, actorUserId: int | None = None
 ) -> bool:
@@ -589,7 +594,7 @@ async def PublishTicketTranscript(
                     break
                 _, oldestTicketId, oldestMessage = retainedMessages.pop(oldestIndex)
                 try:
-                    await oldestMessage.delete(reason="Keep only the 100 most recent ticket transcripts")
+                    await _DeleteTranscriptMessage(oldestMessage)
                     db.ClearTicketTranscriptMessage(oldestTicketId)
                 except discord.HTTPException:
                     retentionSafe = False
@@ -1636,14 +1641,20 @@ async def CompleteCurrentTicket(
         "✅ A moderator resolved this ticket. This proposal is no longer active.",
     )
     payoutSummary = ", ".join(f"<@{userId}>: {amount:,}" for userId, amount in payouts)
+    debtOffsets = guildDatabase.Execute(
+        "SELECT from_user, amount FROM transactions WHERE ticket_id = ? AND type = 'debt_repayment'",
+        (int(ticket["ticket_id"]),), fetchAll=True,
+    )
+    debtOffsetSummary = ", ".join(f"<@{int(row['from_user'])}>: {int(row['amount']):,}" for row in debtOffsets)
+    debtOffsetText = f" Automatic debt repayment applied: {debtOffsetSummary}." if debtOffsetSummary else ""
     await FinalizeTicketChannel(
         interaction.channel, databaseManager, int(ticket["ticket_id"]), "completed",
-        f"✅ Moderator override completed this ticket. Credits distributed: {payoutSummary or 'none'}.",
+        f"✅ Moderator override completed this ticket. Gross rewards: {payoutSummary or 'none'}.{debtOffsetText}",
         interaction.user.id,
     )
     unusedRefund = guildDatabase.GetCompletionRefundAmount(int(ticket["ticket_id"]))
     refundText = f" Unfilled helper-slot refund returned to requester: **{unusedRefund:,} credits**." if unusedRefund else ""
-    await EditEphemeralOriginalResponse(interaction, content=f"✅ Moderator override complete. Credits distributed: {payoutSummary or 'none'}.{refundText}")
+    await EditEphemeralOriginalResponse(interaction, content=f"✅ Moderator override complete. Gross rewards: {payoutSummary or 'none'}.{debtOffsetText}{refundText}")
 
 
 async def CancelUserTicket(interaction: discord.Interaction, databaseManager: DatabaseManager) -> None:
@@ -1784,16 +1795,22 @@ async def ConfirmTicketResolutionCurrent(interaction: discord.Interaction, datab
                 await EditEphemeralOriginalResponse(interaction, content="The ticket was resolved by another action. No duplicate payout was made.")
                 return
             summary = ", ".join(f"<@{userId}>: {amount:,}" for userId, amount in payouts)
+            debtOffsets = db.Execute(
+                "SELECT from_user, amount FROM transactions WHERE ticket_id = ? AND type = 'debt_repayment'",
+                (int(ticket["ticket_id"]),), fetchAll=True,
+            )
+            debtOffsetSummary = ", ".join(f"<@{int(row['from_user'])}>: {int(row['amount']):,}" for row in debtOffsets)
+            debtOffsetText = f" Automatic debt repayment applied: {debtOffsetSummary}." if debtOffsetSummary else ""
             unusedRefund = db.GetCompletionRefundAmount(int(ticket["ticket_id"]))
             refundText = f" Unfilled helper-slot refund returned to requester: **{unusedRefund:,} credits**." if unusedRefund else ""
             if promptMessage is not None:
-                await promptMessage.edit(content=f"✅ All required participants approved completion. Credits distributed: {summary or 'none'}.{refundText}", view=None)
+                await promptMessage.edit(content=f"✅ All required participants approved completion. Gross rewards: {summary or 'none'}.{debtOffsetText}{refundText}", view=None)
             await FinalizeTicketChannel(
                 interaction.channel, databaseManager, int(ticket["ticket_id"]), "completed",
-                f"✅ All required participants approved completion. Credits distributed: {summary or 'none'}.{refundText}",
+                f"✅ All required participants approved completion. Gross rewards: {summary or 'none'}.{debtOffsetText}{refundText}",
                 interaction.user.id,
             )
-            await EditEphemeralOriginalResponse(interaction, content=f"✅ Completion confirmed by all participants ({required}/{required}); credits paid.{refundText}")
+            await EditEphemeralOriginalResponse(interaction, content=f"✅ Completion confirmed by all participants ({required}/{required}); gross rewards: {summary or 'none'}.{debtOffsetText}{refundText}")
         else:
             status, amount = db.RefundTicket(int(ticket["ticket_id"]), actorUserId=interaction.user.id, note="requester and all active helpers approved cancellation")
             if status != "refunded" or amount is None:

@@ -21,8 +21,32 @@ if str(SOURCE_ROOT) not in sys.path:
 from bloxfruits_helper_credit_bot.database import DatabaseManager  # noqa: E402
 from bloxfruits_helper_credit_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES, LoadRuntimeSettings  # noqa: E402
 
-TABLES = ("users", "services", "settings", "invite_events", "tickets", "transactions", "invite_rewards", "scam_reports")
-DELETE_ORDER = ("invite_rewards", "transactions", "tickets", "invite_events", "scam_reports", "users", "services", "settings")
+TABLES = (
+    "users",
+    "services",
+    "settings",
+    "invite_events",
+    "tickets",
+    "transactions",
+    "transaction_audit_deliveries",
+    "invite_rewards",
+    "credit_debts",
+    "invite_attributions",
+    "scam_reports",
+)
+DELETE_ORDER = (
+    "transaction_audit_deliveries",
+    "invite_rewards",
+    "transactions",
+    "tickets",
+    "invite_events",
+    "invite_attributions",
+    "credit_debts",
+    "scam_reports",
+    "users",
+    "services",
+    "settings",
+)
 SERIALS = (("tickets", "ticket_id"), ("transactions", "id"), ("invite_events", "event_id"), ("scam_reports", "report_id"))
 
 

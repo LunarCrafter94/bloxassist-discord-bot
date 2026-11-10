@@ -12,13 +12,16 @@ from discord import app_commands
 from .admin.dashboard_views import (
     CreateOrUpdateDashboard,
     GetDashboardModeratorRoleIds,
+    RefreshDashboardMessage,
     RestoreSavedDashboardMessage,
 )
 from .credits.credit_service import CreditService
-from .audit import SendAuditLog
-from .invites.invite_events import FetchInviteUseCounts, FindUsedInvite
+from .credits.credit_history_view import CreditHistoryView
+from .audit import ResolveAuditChannel, SendAuditLog
+from .invites.invite_events import FetchInviteUseCounts, FindUsedInvite, FormatInviteEventCountdown
 from .backups import PerServerBackupService
 from .interaction_utils import DeferEphemeralResponse, EditEphemeralOriginalResponse, SendEphemeralFollowup, SendEphemeralResponse
+from .pagination import EphemeralPaginator
 from .database import DatabaseManager
 from .settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES, RuntimeSettings
 from .ticket_numbers import TicketLabelFromRow
@@ -35,6 +38,49 @@ from .tickets.ticket_views import (
 
 logger = logging.getLogger(__name__)
 
+MAX_DISCORD_USER_ID = (1 << 64) - 1
+
+
+def ParseDiscordUserId(userId: str | None) -> int | None:
+    """Parse a Discord snowflake supplied as text (safe for IDs above 2**53)."""
+    if userId is None:
+        return None
+    normalized = str(userId).strip()
+    if not normalized or not normalized.isascii() or not normalized.isdecimal():
+        raise ValueError("Enter the numeric Discord User ID only, without a mention or username.")
+    parsed = int(normalized)
+    if not 1 <= parsed <= MAX_DISCORD_USER_ID:
+        raise ValueError("That value is outside the valid Discord User ID range.")
+    return parsed
+
+
+def ResolveCreditLookupUserId(
+    member: discord.Member | None,
+    userId: str | None,
+    *,
+    defaultUserId: int | None = None,
+) -> int | None:
+    """Resolve a current member or a numeric ID, rejecting ambiguous inputs."""
+    if member is not None and userId is not None:
+        raise ValueError("Choose either a current member or a User ID, not both.")
+    if member is not None:
+        return int(member.id)
+    parsed = ParseDiscordUserId(userId)
+    return parsed if parsed is not None else defaultUserId
+
+
+def AppCommandErrorMessage(commandName: str, error: Exception) -> str:
+    """Return a safe, actionable response for common slash-command errors."""
+    if isinstance(error, app_commands.TransformerError):
+        if commandName in {"credits", "credit-history", "ticket-history", "member-activity"}:
+            return (
+                "I couldn't resolve that member. Select someone currently in this server "
+                "or use the user_id option with their numeric Discord User ID."
+            )
+        return "I couldn't understand one of the command options. Check the selected value and try again."
+    if isinstance(error, app_commands.CheckFailure):
+        return "You are not allowed to use this command here. Check the command's permission requirements."
+    return "Something went wrong while running that command. The error was logged; please try again."
 
 
 def IsServerOwner(interaction: discord.Interaction) -> bool:
@@ -59,6 +105,19 @@ def HasConfiguredStaffAccess(interaction: discord.Interaction, databaseManager: 
     allowedRoleIds = set(GetDashboardModeratorRoleIds(db))
     userRoleIds = {role.id for role in getattr(interaction.user, "roles", ())}
     return bool(allowedRoleIds.intersection(userRoleIds))
+
+
+def CanViewMemberCreditDebt(
+    interaction: discord.Interaction,
+    targetUserId: int,
+    databaseManager: DatabaseManager,
+) -> bool:
+    """Allow members to see their own debt and configured staff to see another member's debt."""
+    if interaction.guild is None or interaction.guild_id is None:
+        return False
+    if int(interaction.user.id) == int(targetUserId):
+        return True
+    return HasConfiguredStaffAccess(interaction, databaseManager)
 
 
 def CreateBot(settings: RuntimeSettings) -> discord.Client:
@@ -131,6 +190,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                                 color=discord.Color.orange(), timestamp=discord.utils.utcnow(),
                             )
                             await SendAuditLog(guild, guildDatabase, eventEmbed)
+                            await RefreshDashboardMessage(guild, guildDatabase, databaseManager)
                         expiredTickets = guildDatabase.ExpireStaleResolutionRequests(15)
                         for ticketId, channelId, resolutionType, resolutionMessageId in expiredTickets:
                             channel = guild.get_channel(channelId) if channelId else None
@@ -290,25 +350,45 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 return
             # Save attribution even outside an active reward event so leave penalties
             # can only ever affect the inviter actually identified for this member.
-            guildDatabase.RecordInviteAttribution(member.id, usedInvite.inviter.id, str(usedInvite.code))
+            repeatLeavePenalty = (
+                guildDatabase.GetSetting("invite_leave_penalty_repeat_on_rejoin", "false") or "false"
+            ).lower() in {"true", "1", "yes", "on"}
+            joinedAt = member.joined_at.isoformat() if member.joined_at is not None else None
+            guildDatabase.RecordInviteAttribution(
+                member.id,
+                usedInvite.inviter.id,
+                str(usedInvite.code),
+                repeatOnRejoin=repeatLeavePenalty,
+                joinedAt=joinedAt,
+            )
             event = guildDatabase.GetActiveInviteEvent()
             if event is None:
                 return
+            previousDebt = guildDatabase.GetCreditDebt(usedInvite.inviter.id)
             status, newBalance, reward = guildDatabase.AwardInviteReward(
                 int(event["event_id"]), member.id, usedInvite.inviter.id, str(usedInvite.code)
             )
             if status == "awarded":
+                remainingDebt = guildDatabase.GetCreditDebt(usedInvite.inviter.id)
+                debtRepaid = max(0, previousDebt - remainingDebt)
+                rewardDescription = f"<@{usedInvite.inviter.id}> earned **{reward:,} credits** for inviting <@{member.id}>."
+                if debtRepaid:
+                    rewardDescription += f"\n**{debtRepaid:,} credits** were automatically applied to outstanding debt."
                 rewardEmbed = discord.Embed(
                     title="🎟️ Invite reward awarded",
-                    description=f"<@{usedInvite.inviter.id}> received **{reward:,} credits** for inviting <@{member.id}>.",
+                    description=rewardDescription,
                     color=discord.Color.green(), timestamp=discord.utils.utcnow(),
                 )
                 rewardEmbed.add_field(name="Invite event", value=f"#{int(event['event_id'])}", inline=True)
                 rewardEmbed.add_field(name="New inviter balance", value=f"{int(newBalance or 0):,} credits", inline=True)
+                rewardEmbed.add_field(name="Remaining debt", value=f"{remainingDebt:,} credits", inline=True)
                 rewardEmbed.add_field(name="Invite code", value=f"`{usedInvite.code}`", inline=True)
                 await SendAuditLog(member.guild, guildDatabase, rewardEmbed)
                 try:
-                    await usedInvite.inviter.send(f"🎟️ You earned **{reward:,} credits** in **{member.guild.name}** for inviting a new member during invite event #{int(event['event_id'])}.")
+                    dmText = f"🎟️ You earned **{reward:,} credits** in **{member.guild.name}** for inviting a new member during invite event #{int(event['event_id'])}."
+                    if debtRepaid:
+                        dmText += f"\n**{debtRepaid:,} credits** automatically repaid your outstanding debt. Remaining debt: **{remainingDebt:,} credits**."
+                    await usedInvite.inviter.send(dmText)
                 except discord.HTTPException:
                     logger.info("Could not DM inviter %s about reward in guild %s", usedInvite.inviter.id, member.guild.id)
 
@@ -322,7 +402,8 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 return
             if penalty <= 0:
                 return
-            attribution = guildDatabase.GetInviteAttribution(member.id)
+            joinedAt = member.joined_at.isoformat() if member.joined_at is not None else None
+            attribution = guildDatabase.GetInviteAttribution(member.id, joinedAt=joinedAt)
             if attribution is None:
                 # No reliable invite attribution means no penalty; never guess or deduct
                 # from unrelated members.
@@ -331,17 +412,26 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             if inviterId == int(member.id) or (self.user is not None and inviterId == self.user.id):
                 return
             try:
+                joinCycle = int(attribution["join_cycle"] or 1)
+                # Preserve the original one-time key for cycle 1 so an upgrade
+                # cannot re-charge a penalty that an older build committed before
+                # it failed to mark the attribution row.
+                penaltyKey = f"invite-leave-penalty:{member.guild.id}:{member.id}"
+                if joinCycle > 1:
+                    penaltyKey += f":{joinCycle}"
                 status, balance, debt = guildDatabase.ApplyPenaltyDebt(
                     inviterId,
                     penalty,
                     actorUserId=self.user.id if self.user is not None else member.guild.owner_id,
                     reason=f"Invite penalty: invited member {member.id} left the server (invite {str(attribution['invite_code'])[:80] or 'unknown'})",
-                    idempotencyKey=f"invite-leave-penalty:{member.guild.id}:{member.id}",
+                    idempotencyKey=penaltyKey,
                 )
                 if status not in {"penalized", "duplicate"}:
                     logger.warning("Invite leave penalty not applied: guild=%s invited=%s inviter=%s status=%s", member.guild.id, member.id, inviterId, status)
                     return
-                guildDatabase.MarkInviteLeavePenaltyApplied(member.id)
+                guildDatabase.MarkInviteLeavePenaltyApplied(
+                    member.id, joinCycle=joinCycle
+                )
                 if status == "penalized":
                     embed = discord.Embed(
                         title="⚖️ Inviter leave penalty applied",
@@ -369,6 +459,31 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
 
     bot = CreditBot()
 
+    @bot.tree.error
+    async def OnAppCommandError(
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        commandName = interaction.command.name if interaction.command is not None else ""
+        original = getattr(error, "original", error)
+        if not isinstance(error, (app_commands.TransformerError, app_commands.CheckFailure)):
+            logger.error(
+                "Unhandled application command error: command=%s guild=%s user=%s",
+                commandName, interaction.guild_id, interaction.user.id,
+                exc_info=(type(original), original, original.__traceback__),
+            )
+        message = AppCommandErrorMessage(commandName, error)
+        try:
+            if interaction.response.is_done():
+                await SendEphemeralFollowup(interaction, message)
+            else:
+                await SendEphemeralResponse(interaction, message)
+        except Exception:
+            logger.exception(
+                "Could not send application-command error response: command=%s guild=%s user=%s",
+                commandName, interaction.guild_id, interaction.user.id,
+            )
+
     @bot.tree.command(name="balance", description="Check your credits in this server.")
     @app_commands.guild_only()
     async def Balance(interaction: discord.Interaction) -> None:
@@ -377,24 +492,197 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 "This command must be used inside a server.", ephemeral=True
             )
             return
+        db = databaseManager.ForServer(interaction.guild_id)
         amount = creditService.GetBalance(interaction.guild_id, interaction.user.id)
-        await SendEphemeralResponse(interaction, 
-            f"💰 You have **{amount:,} credits** in this server.", ephemeral=True
-        )
+        debt = db.GetCreditDebt(interaction.user.id)
+        embed = discord.Embed(title="💰 Your credit account", color=discord.Color.blurple())
+        embed.add_field(name="Available credits", value=f"**{amount:,}**", inline=True)
+        embed.add_field(name="Outstanding debt", value=f"**{debt:,}**", inline=True)
+        embed.add_field(name="Net position", value=f"**{amount - debt:+,}**", inline=True)
+        if debt:
+            embed.set_footer(text="Use /repay-debt to pay down your outstanding debt.")
+        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
 
-    @bot.tree.command(name="credits", description="Check another member's credits in this server.")
-    @app_commands.describe(member="The member whose credits you want to check")
+    @bot.tree.command(name="credits", description="Check a member's credits, including former members by User ID.")
+    @app_commands.describe(
+        member="Current server member (select from the list)",
+        user_id="Numeric Discord User ID; works for former members",
+    )
     @app_commands.guild_only()
-    async def Credits(interaction: discord.Interaction, member: discord.Member) -> None:
-        if interaction.guild_id is None:
-            await SendEphemeralResponse(interaction, 
-                "This command must be used inside a server.", ephemeral=True
+    async def Credits(
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "This command must be used inside a server.", ephemeral=True)
+            return
+        try:
+            targetUserId = ResolveCreditLookupUserId(member, user_id)
+        except ValueError as error:
+            await SendEphemeralResponse(interaction, str(error), ephemeral=True)
+            return
+        if targetUserId is None:
+            await SendEphemeralResponse(
+                interaction,
+                "Choose a current member or enter their numeric Discord User ID in user_id.",
+                ephemeral=True,
             )
             return
-        amount = creditService.GetBalance(interaction.guild_id, member.id)
-        await SendEphemeralResponse(interaction, 
-            f"💰 {member.mention} has **{amount:,} credits** in this server.", ephemeral=True
+        db = databaseManager.ForServer(interaction.guild_id)
+        targetMember = member or interaction.guild.get_member(targetUserId)
+        account = db.GetUser(targetUserId)
+        if account is None and targetMember is None:
+            await SendEphemeralResponse(
+                interaction,
+                f"No credit account was found for User ID {targetUserId} in this server. No account was created.",
+                ephemeral=True,
+            )
+            return
+        amount = int(account["credits"]) if account is not None else creditService.GetBalance(interaction.guild_id, targetUserId)
+        memberLabel = (
+            f"{targetMember.mention} ({targetUserId})"
+            if targetMember is not None
+            else f"User ID {targetUserId} (ID lookup)"
         )
+        embed = discord.Embed(title="💰 Member credit account", color=discord.Color.blurple())
+        embed.add_field(name="Member", value=memberLabel, inline=False)
+        embed.add_field(name="Available credits", value=f"**{amount:,}**", inline=True)
+        if CanViewMemberCreditDebt(interaction, targetUserId, databaseManager):
+            debt = db.GetCreditDebt(targetUserId)
+            embed.add_field(name="Outstanding debt", value=f"**{debt:,}**", inline=True)
+        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="repay-debt", description="Use your available credits to repay outstanding debt.")
+    @app_commands.guild_only()
+    @app_commands.describe(amount="Number of credits to apply to your outstanding debt")
+    async def RepayDebt(interaction: discord.Interaction, amount: app_commands.Range[int, 1, 1_000_000_000]) -> None:
+        if interaction.guild_id is None or interaction.guild is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        db = databaseManager.ForServer(interaction.guild_id)
+        await DeferEphemeralResponse(interaction, thinking=True)
+        try:
+            status, balance, debt = db.RepayCreditDebt(
+                interaction.user.id, int(amount),
+                idempotencyKey=f"slash-debt-repayment:{interaction.id}",
+            )
+        except Exception:
+            logger.exception("Debt repayment failed: guild=%s user=%s", interaction.guild_id, interaction.user.id)
+            await EditEphemeralOriginalResponse(interaction, content="The repayment failed. No success was recorded; check your credit history before retrying.")
+            return
+        if status == "insufficient_credits":
+            await EditEphemeralOriginalResponse(interaction, content=f"You have **{int(balance or 0):,} available credits**, which is not enough for that repayment. Your debt remains **{debt:,} credits**.")
+            return
+        if status == "exceeds_debt":
+            await EditEphemeralOriginalResponse(interaction, content=f"Your outstanding debt is only **{debt:,} credits**. Enter an amount no greater than your debt.")
+            return
+        if status == "no_debt":
+            await EditEphemeralOriginalResponse(interaction, content="You do not have any outstanding credit debt.")
+            return
+        if status == "duplicate":
+            await EditEphemeralOriginalResponse(interaction, content=f"This repayment was already processed. Available credits: **{int(balance or 0):,}** · Remaining debt: **{debt:,}**.")
+            return
+        if status != "repaid":
+            await EditEphemeralOriginalResponse(interaction, content=f"Repayment was not applied (status: {status}).")
+            return
+        await EditEphemeralOriginalResponse(interaction, content=f"✅ Repaid **{int(amount):,} credits**.\nAvailable credits: **{int(balance or 0):,}**\nRemaining debt: **{debt:,}**.")
+        embed = discord.Embed(title="💳 Credit debt repayment", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Member", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        embed.add_field(name="Repaid", value=f"{int(amount):,} credits", inline=True)
+        embed.add_field(name="Remaining debt", value=f"{debt:,} credits", inline=True)
+        embed.add_field(name="Available balance", value=f"{int(balance or 0):,} credits", inline=True)
+        await SendAuditLog(interaction.guild, db, embed)
+        logger.info("Member debt repayment: guild=%s user=%s amount=%s remaining_debt=%s", interaction.guild_id, interaction.user.id, int(amount), debt)
+
+    @bot.tree.command(name="credit-history", description="View your history or look up another member by User ID (staff).")
+    @app_commands.guild_only()
+    @app_commands.describe(
+        member="Optional current member (staff access required to view another member)",
+        user_id="Numeric Discord User ID; works for former members",
+        page="History page, 10 transactions per page (buttons also available)",
+    )
+    async def CreditHistory(
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+        user_id: str | None = None,
+        page: app_commands.Range[int, 1, 1000] = 1,
+    ) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        try:
+            targetUserId = ResolveCreditLookupUserId(
+                member, user_id, defaultUserId=interaction.user.id
+            )
+        except ValueError as error:
+            await SendEphemeralResponse(interaction, str(error), ephemeral=True)
+            return
+        if targetUserId != interaction.user.id and not HasConfiguredStaffAccess(interaction, databaseManager):
+            await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can view another member's credit history.", ephemeral=True)
+            return
+
+        db = databaseManager.ForServer(interaction.guild_id)
+        targetMember = member or interaction.guild.get_member(targetUserId)
+        targetLabel = str(targetMember) if targetMember is not None else f"User ID {targetUserId}"
+        view = CreditHistoryView(
+            db,
+            targetUserId=targetUserId,
+            targetLabel=targetLabel,
+            requesterUserId=interaction.user.id,
+            guildId=interaction.guild_id,
+            page=int(page),
+            originInteraction=interaction,
+            staffAccessCheck=lambda buttonInteraction: HasConfiguredStaffAccess(
+                buttonInteraction, databaseManager
+            ),
+        )
+        await SendEphemeralResponse(
+            interaction,
+            embed=view.embed,
+            view=view if view.has_navigation else None,
+            ephemeral=True,
+        )
+        if not view.has_navigation:
+            view.stop()
+
+    @bot.tree.command(name="diagnostics", description="Server owner only: check bot and credit database configuration.")
+    @app_commands.guild_only()
+    async def Diagnostics(interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        if not IsServerOwner(interaction):
+            await SendEphemeralResponse(interaction, "Only this server's owner can run /diagnostics.", ephemeral=True)
+            return
+        db = databaseManager.ForServer(interaction.guild_id)
+        await DeferEphemeralResponse(interaction, thinking=True)
+        checks: list[tuple[str, bool, str]] = []
+        try:
+            db.Execute("SELECT 1", fetchOne=True)
+            checks.append(("Database connection", True, f"{db.backend.upper()} reachable"))
+        except Exception:
+            logger.exception("Database diagnostics failed: guild=%s", interaction.guild_id)
+            checks.append(("Database connection", False, "Connection/query failed; inspect host logs"))
+        try:
+            for table in ("users", "transactions", "credit_debts", "tickets", "scam_reports"):
+                db.Execute(f"SELECT 1 FROM {table} LIMIT 1", fetchOne=True)
+            checks.append(("Core tables", True, "Required tables are queryable"))
+        except Exception:
+            logger.exception("Core table diagnostics failed: guild=%s", interaction.guild_id)
+            checks.append(("Core tables", False, "One or more required tables could not be queried"))
+        auditChannel = await ResolveAuditChannel(interaction.guild, db)
+        if isinstance(auditChannel, discord.TextChannel):
+            permissions = auditChannel.permissions_for(interaction.guild.me) if interaction.guild.me else None
+            canAudit = bool(permissions and permissions.view_channel and permissions.send_messages and permissions.embed_links)
+            checks.append(("Audit log channel", canAudit, auditChannel.mention if canAudit else "Configured channel lacks required bot permissions"))
+        else:
+            checks.append(("Audit log channel", False, "Not configured or channel unavailable"))
+        embed = discord.Embed(title="🔎 BloxAssist diagnostics", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        for label, passed, detail in checks:
+            embed.add_field(name=f"{'✅' if passed else '⚠️'} {label}", value=detail, inline=False)
+        embed.set_footer(text="Diagnostics never displays database credentials or secret values.")
+        await EditEphemeralOriginalResponse(interaction, embed=embed)
 
     setupGroup = app_commands.Group(
         name="setup",
@@ -621,7 +909,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         if status != "penalized":
             await EditEphemeralOriginalResponse(interaction, content=f"Penalty was not applied (status: {status}).")
             return
-        await EditEphemeralOriginalResponse(interaction, content=f"⚖️ Applied a {amount:,}-credit penalty to {member.mention}.\nCurrent credits: {balance:,}. Outstanding debt: {debt:,}.\nReason: {reason.strip()[:500]}\nMembers with debt cannot create/host services.")
+        await EditEphemeralOriginalResponse(interaction, content=f"⚖️ Applied a {amount:,}-credit penalty to {member.mention}.\nCurrent credits: {balance:,}. Outstanding debt: {debt:,}.\nReason: {reason.strip()[:500]}\nMembers with debt cannot create new tickets, but they can still be assigned as helpers. Completed-ticket rewards repay outstanding debt first.")
         embed = discord.Embed(title="⚖️ Credit penalty applied", color=discord.Color.red(), timestamp=discord.utils.utcnow())
         embed.add_field(name="Member", value=f"{member.mention} (`{member.id}`)", inline=False)
         embed.add_field(name="Applied by", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
@@ -737,19 +1025,22 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         embed.add_field(name="Reward per eligible join", value=f"{rewardAmount:,} credits", inline=True)
         embed.add_field(name="Duration", value="Until manually ended" if durationAmount is None else f"{durationAmount} minute(s)", inline=True)
         if endsAt is not None:
-            embed.add_field(name="Ends at (UTC)", value=str(endsAt), inline=False)
+            countdown = FormatInviteEventCountdown({"ends_at": endsAt})
+            embed.add_field(name="Time remaining", value=countdown, inline=False)
         else:
-            embed.add_field(name="End condition", value="Runs until staff uses /invite-event end.", inline=False)
+            countdown = "♾️ Forever (until manually ended)"
+            embed.add_field(name="Time remaining", value=countdown, inline=False)
         confirmation = (
-            f"✅ Started invite reward event #{eventId}. It will keep running until staff uses **/invite-event end**."
+            f"✅ Started invite reward event #{eventId}. It will run forever until staff uses /invite-event end."
             if durationAmount is None
-            else f"✅ Started invite reward event #{eventId}. It ends automatically at {endsAt} UTC."
+            else f"✅ Started invite reward event #{eventId}. Time remaining: {countdown}."
         )
         await SendEphemeralResponse(interaction, confirmation, ephemeral=True)
         await SendAuditLog(interaction.guild, db, embed)
         currentInvites = await FetchInviteUseCounts(interaction.guild)
         if currentInvites is not None:
             bot.inviteUsage[interaction.guild.id] = currentInvites
+        await RefreshDashboardMessage(interaction.guild, db, databaseManager)
 
     @inviteEventGroup.command(name="end", description="End the active invite reward event now.")
     @app_commands.guild_only()
@@ -771,58 +1062,275 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
         embed.add_field(name="Ended by", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
         await SendEphemeralResponse(interaction, f"✅ Invite reward event #{int(event['event_id'])} ended. New joins will no longer earn its reward.", ephemeral=True)
         await SendAuditLog(interaction.guild, db, embed)
+        await RefreshDashboardMessage(interaction.guild, db, databaseManager)
 
     bot.tree.add_command(inviteEventGroup)
 
-    @bot.tree.command(name="ticket-history", description="Staff only: review a member's retained ticket history.")
+    @bot.tree.command(name="ticket-history", description="Staff only: review retained tickets for a current or former member.")
     @app_commands.guild_only()
-    @app_commands.describe(member="The member whose tickets you want to review", limit="Number of recent tickets to show (1–10)")
-    async def TicketHistory(interaction: discord.Interaction, member: discord.Member, limit: app_commands.Range[int, 1, 10] = 10) -> None:
+    @app_commands.describe(
+        member="Current server member (optional when user_id is supplied)",
+        user_id="Numeric Discord User ID; works for former members",
+        limit="Tickets per page (1–10)",
+        page="History page (buttons also available)",
+    )
+    async def TicketHistory(
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+        user_id: str | None = None,
+        limit: app_commands.Range[int, 1, 10] = 10,
+        page: app_commands.Range[int, 1, 1000] = 1,
+    ) -> None:
         if interaction.guild is None or interaction.guild_id is None:
             await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
             return
-        db = databaseManager.ForServer(interaction.guild_id)
         if not HasConfiguredStaffAccess(interaction, databaseManager):
             await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can view ticket history.", ephemeral=True)
             return
-        rows = db.ListTicketHistoryForMember(member.id, int(limit))
-        embed = discord.Embed(title=f"📚 Ticket history · {member}", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
-        embed.description = f"Member ID: `{member.id}`\nShowing {len(rows)} most recent matching ticket(s). The database retains ticket/transaction metadata even after the ticket channel is deleted."
-        for row in rows[:10]:
-            ticketNumber = int(row["ticket_number"] or 0)
+        try:
+            targetUserId = ResolveCreditLookupUserId(member, user_id)
+        except ValueError as error:
+            await SendEphemeralResponse(interaction, str(error), ephemeral=True)
+            return
+        if targetUserId is None:
+            await SendEphemeralResponse(
+                interaction,
+                "Choose a current member or enter their numeric Discord User ID in user_id.",
+                ephemeral=True,
+            )
+            return
+
+        db = databaseManager.ForServer(interaction.guild_id)
+        targetMember = member or interaction.guild.get_member(targetUserId)
+        targetLabel = str(targetMember) if targetMember is not None else f"User ID {targetUserId}"
+        pageSize = int(limit)
+
+        def LoadTicketHistoryPage(pageNumber: int) -> tuple[discord.Embed, bool]:
+            rows = db.ListTicketHistoryForMember(
+                targetUserId,
+                pageSize + 1,
+                offset=(pageNumber - 1) * pageSize,
+            )
+            visibleRows = rows[:pageSize]
+            embed = discord.Embed(
+                title=f"📚 Ticket history · {targetLabel}",
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.description = (
+                f"Member ID: `{targetUserId}`\n"
+                f"Showing page {pageNumber} · {pageSize} ticket(s) per page. "
+                "The database retains ticket/transaction metadata even after the ticket channel is deleted."
+            )
+            for row in visibleRows:
+                ticketLabel = TicketLabelFromRow(row)
+                helpers = db._ParseIdCsv(str(row["helper_ids"] or ""))
+                value = (
+                    f"Status: **{row['status']}** · Event key: `{row['event_key']}`\n"
+                    f"Requester: <@{int(row['creator_id'])}> · Helpers: "
+                    + (", ".join(f"<@{x}>" for x in helpers) or "none")
+                    + f"\nReserved: {int(row['reserved_credits']):,} credits · Created: {row['created_at']}"
+                )
+                transcriptChannelId = row["transcript_channel_id"] if "transcript_channel_id" in row.keys() else None
+                transcriptMessageId = row["transcript_message_id"] if "transcript_message_id" in row.keys() else None
+                if transcriptChannelId and transcriptMessageId:
+                    value += f"\n[Open transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
+                else:
+                    value += "\nTranscript link: unavailable (no successfully saved transcript was recorded)."
+                embed.add_field(
+                    name=f"Ticket #{ticketLabel} · Database ID {int(row['ticket_id'])}",
+                    value=value[:1024],
+                    inline=False,
+                )
+            if not visibleRows:
+                embed.description += "\nNo retained ticket records matched this member on this page."
+            return embed, len(rows) > pageSize
+
+        view = EphemeralPaginator(
+            LoadTicketHistoryPage,
+            page=int(page),
+            requesterUserId=interaction.user.id,
+            guildId=interaction.guild_id,
+            originInteraction=interaction,
+            accessCheck=lambda buttonInteraction: HasConfiguredStaffAccess(
+                buttonInteraction, databaseManager
+            ),
+        )
+        await SendEphemeralResponse(
+            interaction,
+            embed=view.embed,
+            view=view if view.has_navigation else None,
+            ephemeral=True,
+        )
+        if not view.has_navigation:
+            view.stop()
+
+    @bot.tree.command(name="member-activity", description="Staff only: summarize a member's credits, debt, transactions, and tickets.")
+    @app_commands.guild_only()
+    @app_commands.describe(
+        member="Current server member (optional when user_id is supplied)",
+        user_id="Numeric Discord User ID; works for former members",
+    )
+    async def MemberActivity(
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        if interaction.guild is None or interaction.guild_id is None:
+            await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
+            return
+        if not HasConfiguredStaffAccess(interaction, databaseManager):
+            await SendEphemeralResponse(
+                interaction,
+                "Only Administrators or configured dashboard moderators can view member activity.",
+                ephemeral=True,
+            )
+            return
+        try:
+            targetUserId = ResolveCreditLookupUserId(member, user_id)
+        except ValueError as error:
+            await SendEphemeralResponse(interaction, str(error), ephemeral=True)
+            return
+        if targetUserId is None:
+            await SendEphemeralResponse(
+                interaction,
+                "Choose a current member or enter their numeric Discord User ID in user_id.",
+                ephemeral=True,
+            )
+            return
+
+        db = databaseManager.ForServer(interaction.guild_id)
+        targetMember = member or interaction.guild.get_member(targetUserId)
+        targetLabel = str(targetMember) if targetMember is not None else f"User ID {targetUserId}"
+        summary = db.GetMemberActivitySummary(targetUserId)
+        embed = discord.Embed(
+            title=f"🧾 Member activity · {targetLabel}",
+            description=f"User ID: `{targetUserId}` · Read-only summary of records currently retained by this server.",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        if summary["available_credits"] is None:
+            accountText = "No credit account is stored."
+        else:
+            accountText = f"Available credits: **{int(summary['available_credits']):,}**"
+        accountText += f"\nOutstanding debt: **{int(summary['outstanding_debt']):,}**"
+        embed.add_field(name="Credit account", value=accountText, inline=True)
+        embed.add_field(
+            name="Retained activity",
+            value=(
+                f"Transactions: **{int(summary['transaction_count']):,}**\n"
+                f"Retained tickets: **{int(summary['ticket_count']):,}** "
+                f"(open: **{int(summary['open_ticket_count']):,}**)"
+            ),
+            inline=True,
+        )
+
+        transactionLines = []
+        for row in summary["recent_transactions"]:
+            transactionType = str(row["type"]).replace("_", " ").title()
+            transactionLines.append(
+                f"#{int(row['id'])} · **{transactionType}** · {int(row['amount']):,} credits · {row['created_at']}"
+            )
+        embed.add_field(
+            name="Recent credit transactions",
+            value="\n".join(transactionLines)[:1024] if transactionLines else "No retained credit transactions.",
+            inline=False,
+        )
+
+        ticketLines = []
+        for row in summary["recent_tickets"]:
             ticketLabel = TicketLabelFromRow(row)
-            helpers = db._ParseIdCsv(str(row["helper_ids"] or ""))
-            value = (f"Status: **{row['status']}** · Event key: `{row['event_key']}`\n"
-                     f"Requester: <@{int(row['creator_id'])}> · Helpers: " + (", ".join(f"<@{x}>" for x in helpers) or "none") +
-                     f"\nReserved: {int(row['reserved_credits']):,} credits · Created: {row['created_at']}")
+            line = f"Ticket #{ticketLabel} · **{str(row['status']).title()}** · {row['created_at']}"
             transcriptChannelId = row["transcript_channel_id"] if "transcript_channel_id" in row.keys() else None
             transcriptMessageId = row["transcript_message_id"] if "transcript_message_id" in row.keys() else None
             if transcriptChannelId and transcriptMessageId:
-                value += f"\n[Open transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
-            else:
-                value += "\nTranscript link: unavailable (no successfully saved transcript was recorded)."
-            embed.add_field(name=f"Ticket #{ticketLabel} · Database ID {int(row['ticket_id'])}", value=value[:1024], inline=False)
-        if not rows:
-            embed.description += "\nNo retained ticket records matched this member."
+                line += f" · [Transcript](https://discord.com/channels/{interaction.guild_id}/{int(transcriptChannelId)}/{int(transcriptMessageId)})"
+            ticketLines.append(line)
+        embed.add_field(
+            name="Recent retained tickets",
+            value="\n".join(ticketLines)[:1024] if ticketLines else "No retained ticket history.",
+            inline=False,
+        )
+        embed.set_footer(text="Latest 5 transactions and 3 tickets shown. Older completed ticket records may have been pruned by retention.")
         await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
 
-    @bot.tree.command(name="reports", description="Staff only: list unresolved reports across categories and related ticket history.")
+    @bot.tree.command(name="reports", description="Staff only: browse reports by status, category, and page.")
     @app_commands.guild_only()
-    @app_commands.describe(limit="Number of recent open reports to show (1–5; Discord embed limits)")
-    async def Reports(interaction: discord.Interaction, limit: app_commands.Range[int, 1, 5] = 5) -> None:
+    @app_commands.describe(
+        page="Page number (5 reports per page; buttons also available)",
+        category="Optional report category filter",
+        status="Report status filter (defaults to Open)",
+    )
+    @app_commands.choices(
+        category=[
+            app_commands.Choice(name="All categories", value="all"),
+            app_commands.Choice(name="Scam / Fraud", value="scam"),
+            app_commands.Choice(name="Bug / Bot Issue", value="bug"),
+            app_commands.Choice(name="Ticket / Credit Issue", value="ticket_credit"),
+            app_commands.Choice(name="Member Misconduct", value="member_behavior"),
+            app_commands.Choice(name="Other / General Issue", value="other"),
+        ],
+        status=[
+            app_commands.Choice(name="Open", value="open"),
+            app_commands.Choice(name="Confirmed", value="confirmed"),
+            app_commands.Choice(name="Dismissed", value="dismissed"),
+            app_commands.Choice(name="All statuses", value="all"),
+        ],
+    )
+    async def Reports(
+        interaction: discord.Interaction,
+        page: app_commands.Range[int, 1, 1000] = 1,
+        category: app_commands.Choice[str] | None = None,
+        status: app_commands.Choice[str] | None = None,
+    ) -> None:
         if interaction.guild is None or interaction.guild_id is None:
             await SendEphemeralResponse(interaction, "Use this command inside a server.", ephemeral=True)
             return
         if not HasConfiguredStaffAccess(interaction, databaseManager):
             await SendEphemeralResponse(interaction, "Only Administrators or configured dashboard moderators can review reports.", ephemeral=True)
             return
+
         db = databaseManager.ForServer(interaction.guild_id)
-        rows = db.ListScamReports(status="open", limit=int(limit))
-        embed = discord.Embed(title="📨 Open reports", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
-        if not rows:
-            embed.description = "There are no open reports."
-        else:
-            embed.description = "Use `/report-review` to confirm or dismiss a report after reviewing the available evidence."
+        categoryValue = category.value if category and category.value != "all" else None
+        categoryText = category.name if category else "All categories"
+        statusValue = status.value if status else "open"
+        statusLabels = {
+            "open": "Open",
+            "confirmed": "Confirmed",
+            "dismissed": "Dismissed",
+            "all": "All statuses",
+        }
+        statusText = statusLabels.get(statusValue, "Open")
+
+        def LoadReportsPage(pageNumber: int) -> tuple[discord.Embed, bool]:
+            rows = db.ListScamReports(
+                status=statusValue,
+                limit=6,
+                reportType=categoryValue,
+                offset=(pageNumber - 1) * 5,
+            )
+            visibleRows = rows[:5]
+            embed = discord.Embed(
+                title=f"📨 {statusText} reports · {categoryText}",
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.set_footer(
+                text=f"Page {pageNumber} · 5 reports per page · {statusText} · {categoryText}"
+            )
+            if not visibleRows:
+                if statusValue == "all":
+                    emptyStatusText = "reports"
+                else:
+                    emptyStatusText = f"{statusText.lower()} reports"
+                embed.description = f"No {emptyStatusText} were found for the selected category."
+            elif statusValue == "open":
+                embed.description = "Use `/report-review` to confirm or dismiss an open report after reviewing the available evidence."
+            elif statusValue == "all":
+                embed.description = "Open reports can be reviewed with `/report-review`. Previously reviewed reports include their reviewer and saved note."
+            else:
+                embed.description = "These reports have already been reviewed. Their recorded reviewer and note are shown where available."
+
             categoryLabels = {
                 "scam": "Scam / Fraud",
                 "bug": "Bug / Bot Issue",
@@ -830,7 +1338,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 "member_behavior": "Member Misconduct",
                 "other": "Other / General Issue",
             }
-            for row in rows[:10]:
+            for row in visibleRows:
                 reportedUserId = int(row["reported_user_id"] or 0)
                 reportType = str(row["report_type"] if "report_type" in row.keys() else "scam")
                 categoryLabel = categoryLabels.get(reportType, "Other / General Issue")
@@ -854,18 +1362,48 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                           else "No transcript/open ticket links found for this member.")
                 )
                 memberText = f"<@{reportedUserId}> (`{reportedUserId}`)" if reportedUserId > 0 else "Not specified"
+                reportStatus = str(row["status"]).title()
+                reviewText = ""
+                if str(row["status"]) != "open":
+                    reviewerId = int(row["reviewed_by"] or 0)
+                    reviewerText = f"<@{reviewerId}> (`{reviewerId}`)" if reviewerId > 0 else "Not recorded"
+                    reviewNote = str(row["review_note"] or "No review note was saved.")
+                    reviewText = (
+                        f"**Reviewed by:** {reviewerText}\n"
+                        f"**Review note:** {reviewNote[:180]}\n"
+                    )
                 embed.add_field(
-                    name=f"Report #{int(row['report_id'])} · {str(row['created_at'])}",
+                    name=f"Report #{int(row['report_id'])} · {reportStatus} · {str(row['created_at'])}",
                     value=(
                         f"**Category:** {categoryLabel}\n"
                         f"**Reported member:** {memberText}\n"
                         f"**Reporter:** <@{int(row['reporter_user_id'])}> (`{int(row['reporter_user_id'])}`)\n"
                         f"**Details:** {str(row['details'])[:250]}\n"
+                        f"{reviewText}"
                         f"**Related history:** {linksText}"
                     )[:1024],
                     inline=False,
                 )
-        await SendEphemeralResponse(interaction, embed=embed, ephemeral=True)
+            return embed, len(rows) > 5
+
+        view = EphemeralPaginator(
+            LoadReportsPage,
+            page=int(page),
+            requesterUserId=interaction.user.id,
+            guildId=interaction.guild_id,
+            originInteraction=interaction,
+            accessCheck=lambda buttonInteraction: HasConfiguredStaffAccess(
+                buttonInteraction, databaseManager
+            ),
+        )
+        await SendEphemeralResponse(
+            interaction,
+            embed=view.embed,
+            view=view if view.has_navigation else None,
+            ephemeral=True,
+        )
+        if not view.has_navigation:
+            view.stop()
 
     @bot.tree.command(name="report-review", description="Staff only: confirm or dismiss an open report.")
     @app_commands.guild_only()

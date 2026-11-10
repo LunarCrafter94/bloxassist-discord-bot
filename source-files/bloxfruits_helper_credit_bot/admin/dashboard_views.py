@@ -10,6 +10,7 @@ import discord
 
 from ..database import DatabaseManager, GuildDatabase
 from ..interaction_utils import SendEphemeralResponse
+from ..invites.invite_events import FormatInviteEventCountdown
 from ..ticket_messages import DEFAULT_TICKET_WELCOME_MESSAGE, RenderTicketWelcomeMessage
 
 logger = logging.getLogger(__name__)
@@ -177,6 +178,78 @@ async def ApplyTicketStaffRolePolicy(
     return updatedChannels, failedChannelIds
 
 
+def BuildServerStatisticsEmbed(guild: discord.Guild, guildDatabase: GuildDatabase) -> discord.Embed:
+    """Build a private, read-only snapshot of server-scoped BloxAssist activity."""
+    stats = guildDatabase.GetServerStatistics()
+    ticketStatuses = stats["ticket_statuses"]
+    reportStatuses = stats["report_statuses"]
+    ticketTotal = sum(int(value) for value in ticketStatuses.values())
+    reportTotal = sum(int(value) for value in reportStatuses.values())
+
+    ticketBreakdown = (
+        "\n".join(
+            f"• {str(status).replace('_', ' ').title()}: **{int(amount):,}**"
+            for status, amount in sorted(ticketStatuses.items())
+        )
+        if ticketStatuses else "No retained ticket records."
+    )
+    reportBreakdown = (
+        "\n".join(
+            f"• {str(status).title()}: **{int(amount):,}**"
+            for status, amount in sorted(reportStatuses.items())
+        )
+        if reportStatuses else "No reports recorded."
+    )
+
+    embed = discord.Embed(
+        title=f"📊 Server statistics · {guild.name[:100]}",
+        description="Private, read-only snapshot of this server's BloxAssist records.",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(
+        name="Members and credits",
+        value=(
+            f"Tracked accounts: **{int(stats['tracked_members']):,}**\n"
+            f"Available credits: **{int(stats['available_credits']):,}**\n"
+            f"Outstanding debt: **{int(stats['outstanding_debt']):,}** "
+            f"across **{int(stats['debtors']):,}** debtor(s)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"Tickets · {ticketTotal:,} retained",
+        value=ticketBreakdown[:1024],
+        inline=True,
+    )
+    embed.add_field(
+        name=f"Reports · {reportTotal:,} total",
+        value=reportBreakdown[:1024],
+        inline=True,
+    )
+    embed.add_field(
+        name="Credit ledger",
+        value=f"**{int(stats['ledger_entries']):,}** retained transaction record(s)",
+        inline=True,
+    )
+    embed.add_field(
+        name="Service catalog",
+        value=f"**{int(stats['enabled_services']):,}** enabled service(s)",
+        inline=True,
+    )
+    embed.add_field(
+        name="Invite rewards",
+        value=(
+            f"Reward records: **{int(stats['invite_reward_count']):,}**\n"
+            f"Gross rewards recorded: **{int(stats['invite_reward_credits']):,} credits**\n"
+            f"Active event: **{'Yes' if stats['active_invite_event'] else 'No'}**"
+        ),
+        inline=True,
+    )
+    embed.set_footer(text="Counts reflect records currently retained in this server's database.")
+    return embed
+
+
 def BuildDashboardEmbed(guild: discord.Guild, guildDatabase: GuildDatabase) -> discord.Embed:
     activeServices = guildDatabase.ListServices(activeOnly=True)
     serviceLines = [
@@ -226,7 +299,18 @@ def BuildDashboardEmbed(guild: discord.Guild, guildDatabase: GuildDatabase) -> d
     embed.add_field(name="Maximum helpers per ticket", value=f"**{guildDatabase.GetMaxHelpers()}**", inline=True)
     embed.add_field(name="Invite reward defaults", value=f"{inviteState}\nReward: **{rewardCredits:,}** credits\nDefault duration: **{durationMinutes} minutes**", inline=True)
     leavePenalty = int(guildDatabase.GetSetting("invite_leave_penalty_credits", "0") or "0")
-    embed.add_field(name="Inviter leave penalty", value=f"**{leavePenalty:,} credits** per invited member who leaves\nSet to **0** to disable. Only the recorded inviter is penalized.", inline=True)
+    repeatLeavePenalty = (guildDatabase.GetSetting("invite_leave_penalty_repeat_on_rejoin", "false") or "false").lower() in {"true", "1", "yes", "on"}
+    repeatPolicy = "Every attributed rejoin/leave cycle" if repeatLeavePenalty else "Once per invited member"
+    embed.add_field(
+        name="Inviter leave penalty",
+        value=(
+            f"**{leavePenalty:,} credits** per attributed departure\n"
+            f"Repeat after rejoin: **{'Enabled' if repeatLeavePenalty else 'Disabled'}**\n"
+            f"Policy: {repeatPolicy}\n"
+            "Set amount to **0** to disable. Only the recorded inviter is penalized."
+        ),
+        inline=True,
+    )
     embed.add_field(name="Enabled events · price per helper", value="\n".join(serviceLines)[:1024], inline=False)
     embed.add_field(name="Public Help Center", value=helpCenterText, inline=True)
     embed.add_field(name="Ticket staff access baseline", value=baselineText, inline=True)
@@ -243,9 +327,14 @@ def BuildDashboardEmbed(guild: discord.Guild, guildDatabase: GuildDatabase) -> d
     )
     activeInviteEvent = guildDatabase.GetActiveInviteEvent()
     if activeInviteEvent is not None:
+        countdown = FormatInviteEventCountdown(activeInviteEvent)
         embed.add_field(
             name="Active invite event",
-            value=f"Event #{int(activeInviteEvent['event_id'])} · {int(activeInviteEvent['reward_credits']):,} credits per eligible join\nEnds: {activeInviteEvent['ends_at']}",
+            value=(
+                f"Event #{int(activeInviteEvent['event_id'])} · "
+                f"{int(activeInviteEvent['reward_credits']):,} credits per eligible join\n"
+                f"Time remaining: {countdown}"
+            ),
             inline=False,
         )
     else:
@@ -384,6 +473,17 @@ class DashboardView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="Server Statistics", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="bf:dashboard:server_statistics", row=1)
+    async def ServerStatistics(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await EnsureDashboardAccess(interaction, self.databaseManager):
+            return
+        db = self.databaseManager.ForServer(interaction.guild_id)
+        await SendEphemeralResponse(
+            interaction,
+            embed=BuildServerStatisticsEmbed(interaction.guild, db),
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="Maximum Helpers", emoji="👥", style=discord.ButtonStyle.primary, custom_id="bf:dashboard:max_helpers", row=1)
     async def MaximumHelpers(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await EnsureDashboardAccess(interaction, self.databaseManager):
@@ -404,7 +504,13 @@ class DashboardView(discord.ui.View):
             await SendEphemeralResponse(interaction, "Only the server owner can change inviter leave penalties.", ephemeral=True)
             return
         db = self.databaseManager.ForServer(interaction.guild_id)
-        await interaction.response.send_modal(InviteLeavePenaltyModal(self.databaseManager, db.GetSetting("invite_leave_penalty_credits", "0") or "0"))
+        await interaction.response.send_modal(
+            InviteLeavePenaltyModal(
+                self.databaseManager,
+                db.GetSetting("invite_leave_penalty_credits", "0") or "0",
+                db.GetSetting("invite_leave_penalty_repeat_on_rejoin", "false") or "false",
+            )
+        )
 
     @discord.ui.button(label="Help Center Channel", emoji="📣", style=discord.ButtonStyle.primary, custom_id="bf:dashboard:help_channel", row=2)
     async def HelpCenterChannel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -563,11 +669,19 @@ class InviteLeavePenaltyModal(discord.ui.Modal, title="Inviter Leave Penalty"):
         max_length=10,
         required=True,
     )
+    repeatOnRejoin = discord.ui.TextInput(
+        label="Repeat after each attributed rejoin? (yes/no)",
+        placeholder="no",
+        min_length=2,
+        max_length=5,
+        required=True,
+    )
 
-    def __init__(self, databaseManager: DatabaseManager, currentAmount: str):
+    def __init__(self, databaseManager: DatabaseManager, currentAmount: str, currentRepeat: str = "false"):
         super().__init__()
         self.databaseManager = databaseManager
         self.amount.default = str(currentAmount)
+        self.repeatOnRejoin.default = "yes" if str(currentRepeat).strip().lower() in {"true", "1", "yes", "on"} else "no"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or interaction.guild.owner_id != interaction.user.id:
@@ -577,12 +691,23 @@ class InviteLeavePenaltyModal(discord.ui.Modal, title="Inviter Leave Penalty"):
         if not raw.isdigit() or int(raw) > MAX_CREDITS:
             await SendEphemeralResponse(interaction, f"Enter a whole number from 0 to {MAX_CREDITS:,}.", ephemeral=True)
             return
+        repeatText = str(self.repeatOnRejoin.value).strip().lower()
+        if repeatText not in {"yes", "no", "true", "false", "on", "off", "1", "0"}:
+            await SendEphemeralResponse(interaction, "Use yes or no for the repeat-after-rejoin setting.", ephemeral=True)
+            return
+        repeatEnabled = repeatText in {"yes", "true", "on", "1"}
         db = self.databaseManager.ForServer(interaction.guild_id)
         db.SetSetting("invite_leave_penalty_credits", int(raw))
+        db.SetSetting("invite_leave_penalty_repeat_on_rejoin", "true" if repeatEnabled else "false")
         await SendEphemeralResponse(
             interaction,
-            f"✅ Inviter leave penalty saved: **{int(raw):,} credits** per attributed member who leaves. "
-            + ("Penalties are disabled." if int(raw) == 0 else "Only that member's recorded inviter can be penalized."),
+            f"✅ Inviter leave penalty saved: **{int(raw):,} credits** per attributed departure. "
+            + ("Penalties are disabled. " if int(raw) == 0 else "Only the recorded inviter can be penalized. ")
+            + (
+                "Repeat penalties are enabled for each newly attributed rejoin/leave cycle."
+                if repeatEnabled else
+                "Repeat penalties are disabled; each invited member can trigger at most one leave penalty."
+            ),
             ephemeral=True,
         )
         await RefreshDashboardMessage(interaction.guild, db, self.databaseManager)

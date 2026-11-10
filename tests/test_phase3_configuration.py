@@ -61,6 +61,15 @@ class Phase3ConfigurationTests(unittest.TestCase):
         self.assertEqual(self.guildB.GetSetting("invite_rewards_enabled"), "false")
         self.assertEqual(self.guildB.GetSetting("invite_reward_credits"), "50")
 
+    def test_inviter_leave_penalty_repeat_setting_is_guild_specific_and_disabled_by_default(self):
+        setting = "invite_leave_penalty_repeat_on_rejoin"
+        self.assertEqual(self.guildA.GetSetting(setting), "false")
+        self.assertEqual(self.guildB.GetSetting(setting), "false")
+
+        self.guildA.SetSetting(setting, "true")
+        self.assertEqual(self.guildA.GetSetting(setting), "true")
+        self.assertEqual(self.guildB.GetSetting(setting), "false")
+
     def test_event_catalog_change_is_guild_specific(self):
         self.guildA.SaveService("test_event", "Test Event", 325, active=False)
         inactive = self.guildA.GetService("test_event", activeOnly=False)
@@ -99,6 +108,12 @@ class Phase3ConfigurationTests(unittest.TestCase):
         self.assertEqual(self.guildA.GetSetting("help_center_message_id"), "8002")
         self.assertEqual(self.guildB.GetSetting("dashboard_channel_id"), "")
         self.assertEqual(self.guildB.GetSetting("help_center_channel_id"), "")
+
+    def test_default_services_exclude_redundant_race_awakening(self):
+        service_keys = {service[0] for service in DEFAULT_SERVICES}
+
+        self.assertIn("v4_trials", service_keys)
+        self.assertNotIn("race_awakening", service_keys)
 
 
 if __name__ == "__main__":
