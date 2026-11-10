@@ -21,7 +21,6 @@ DEFAULT_SERVICES = (
     ("v4_trials", "V4 Trials", 200),
     ("leviathan", "Leviathan", 100),
     ("mirage", "Mirage Island", 100),
-    ("race_awakening", "Race Awakening", 200),
     ("cake_prince", "Cake Prince", 100),
     ("dough_king", "Dough King", 100),
     ("sea_events", "Sea Events", 100),

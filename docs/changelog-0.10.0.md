@@ -59,3 +59,33 @@
 - Added regression coverage ensuring the PostgreSQL restore table list matches the full application schema and that foreign-key-dependent rows are deleted in a safe order.
 
 - Live PostgreSQL restore QA passed on November 4, 2026: the encrypted 12:39:20 UTC backup for server `1560356320954294313` was decrypted, validated, and applied to schema `server_1560356320954294313`. All 11 tables were restored and row counts verified (165 rows total); serial sequences were reset by the restore utility. A subsequent live `/diagnostics` confirmed PostgreSQL connectivity, queryable core tables, and the configured `#ticket-audit` channel. The 128-test suite also passed locally (9.303 seconds) after the restore utility update.
+
+## Service catalog cleanup
+
+- Removed Race Awakening from the default service catalog because it duplicates V4 Trials.
+- Existing guild databases retain their previously configured services. This cleanup does not automatically remove Race Awakening from existing servers.
+
+## Live acceptance testing — November 10, 2026
+
+The v0.10.0 candidate underwent extensive live testing in a separate Discord test server.
+
+### Verified
+
+- Owner-only `/diagnostics` access and database connectivity checks.
+- Dashboard access for Administrators and configured moderators, including restrictions on moderator-role management.
+- Event Catalog viewing, selection, editing-modal prefill, and refresh behavior.
+- `/member-activity`, `/credit-history`, and `/ticket-history` access controls, pagination, and former-member lookups.
+- `/reports` status and category filters, pagination, and saved review information.
+- Credit privacy: ordinary members can view another member's available credits but cannot view that member's debt.
+- Transcript publication and content, including ticket metadata and conversation history.
+- Audit-channel notifications and credit/invite-related audit entries.
+- Graceful shutdown and startup behavior, including backup delivery.
+- Restart persistence of balances, debts, tickets, reports, transactions, services, and invite-event data.
+- Encrypted per-server backup decryption, manifest validation, and SQLite integrity check.
+
+### Automated validation
+
+- Python compilation completed successfully using `compileall`.
+- The automated unittest suite passed: **173 tests, 0 failures**.
+
+> **Deployment note:** BloxAssist remains in beta. Passing automated tests and acceptance testing in a dedicated Discord test server does not establish broad production readiness across multiple communities or at scale.

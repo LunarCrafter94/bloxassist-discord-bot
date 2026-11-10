@@ -109,6 +109,12 @@ class Phase3ConfigurationTests(unittest.TestCase):
         self.assertEqual(self.guildB.GetSetting("dashboard_channel_id"), "")
         self.assertEqual(self.guildB.GetSetting("help_center_channel_id"), "")
 
+    def test_default_services_exclude_redundant_race_awakening(self):
+        service_keys = {service[0] for service in DEFAULT_SERVICES}
+
+        self.assertIn("v4_trials", service_keys)
+        self.assertNotIn("race_awakening", service_keys)
+
 
 if __name__ == "__main__":
     unittest.main()
