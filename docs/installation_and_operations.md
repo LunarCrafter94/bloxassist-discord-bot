@@ -41,7 +41,7 @@ BACKUP_ENCRYPTION_PASSWORD=
 
 - `DISCORD_TOKEN` is required.
 - `GUILD_ID` is optional and controls development slash-command synchronization only.
-- `DATABASE_BACKEND` is `sqlite` by default or `postgresql` after a remote PostgreSQL project is ready.
+- `DATABASE_BACKEND` is `sqlite` by default or `postgresql` when using a configured remote PostgreSQL database.
 - `DATABASE_URL` contains a database password and must not be committed.
 - `BACKUP_DISCORD_USER_ID` and `BACKUP_ENCRYPTION_PASSWORD` are both required to enable the hourly encrypted per-server ZIP backups.
 
@@ -72,21 +72,24 @@ Each server uses `data/servers/<server_id>/blox_fruits_credit_system.sqlite3`. T
 
 ### PostgreSQL
 
-The current PostgreSQL compatibility adapter is **experimental** until live-tested with the selected provider and the actual application workload. Put the URL in `DATABASE_URL`; the application creates an isolated schema `server_<server_id>` for each Discord server.
+BloxAssist's PostgreSQL backend has been live-tested with Supabase. The deployed bot has been operating against Supabase PostgreSQL for approximately two weeks as of November 11, 2026. The application creates an isolated schema named `server_<server_id>` for each Discord server. This validates the current Supabase deployment and exercised application workload; it does not establish broad production readiness at scale or automatically validate other PostgreSQL providers.
 
-One-time migration, with bot stopped and the current SQLite files available under `data/servers/`:
+Put the connection URL in `DATABASE_URL` using the hosting provider's secret/environment settings or a private local `credentials.env` file. Never commit the URL or its password.
+
+#### One-time migration from SQLite
+
+The migration utility is only for an existing SQLite deployment that is intentionally moving to PostgreSQL. It is not needed by an installation that already uses PostgreSQL. With the bot stopped and the current SQLite files available under `data/servers/`, run:
 
 ```powershell
-.\.venv\Scripts\python.exe tools\Migrate-SQLite-To-Postgres.py
+.\.venv\Scripts\python.exe tools\\Migrate-SQLite-To-Postgres.py
 ```
 
-The script prompts for `MIGRATE`, checks that each target schema contains only the known default seed settings/service catalog, preserves source SQLite files, imports server tables in dependency order, resets serial sequences, and checks row counts. It refuses to merge into non-empty or customized target schemas. Fix any column mismatch before retrying; don't manually delete tables to get past the safety check.
+The script prompts for `MIGRATE`, checks that each target schema contains only the known default seed settings/service catalog, preserves source SQLite files, imports server tables in dependency order, resets serial sequences, and checks row counts. It refuses to merge into non-empty or customized target schemas. Do not run it against an already-populated live PostgreSQL deployment.
 
-Before production cutover, compare at least: number of users, total user credits, ticket counts by status, transaction counts/totals, service catalog, settings keys, and transcript/report rows. Run test tickets and invite events using a development Discord server. Do not run SQLite and PostgreSQL instances simultaneously with the same Discord bot token against production: simultaneous writes could diverge their data.
+For a SQLite-to-PostgreSQL cutover, compare user counts, total credits, ticket counts by status, transaction counts/totals, service catalog, settings keys, and transcript/report rows. Test with a development Discord server before switching the production token. Do not run SQLite and PostgreSQL instances simultaneously with the same Discord bot token against production: simultaneous writes could diverge their data.
+## 4. Five-hourly per-server encrypted DM backups
 
-## 4. Hourly per-server encrypted DM backups
-
-Configure `BACKUP_DISCORD_USER_ID` to the numeric Discord user ID of the recipient and `BACKUP_ENCRYPTION_PASSWORD` to a strong password. The service starts a backup cycle after the client is ready, then repeats every hour. It sends a different ZIP for each server:
+Configure `BACKUP_DISCORD_USER_ID` to the numeric Discord user ID of the recipient and `BACKUP_ENCRYPTION_PASSWORD` to a strong password. The service starts a backup cycle after the client is ready, then repeats every five hours. It sends a different ZIP for each server:
 
 - SQLite mode: a transaction-safe SQLite snapshot created using `sqlite3.Connection.backup()` and checked with `PRAGMA integrity_check`.
 - PostgreSQL mode: a repeatable-read, read-only export of that server's schema as JSON rows/columns inside the encrypted ZIP.
@@ -120,4 +123,4 @@ Compile and run tests:
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Use `tools/Test-Project.ps1` if the local `.venv` exists. Tests with a skipped Discord registration check mean `discord.py` was not available in that validation environment; they do not validate live command registration. Live acceptance testing is still necessary for Discord permissions, transcript attachments, invite attribution, and real PostgreSQL connections.
+Use `tools/Test-Project.ps1` if the local `.venv` exists. Tests with a skipped Discord registration check mean `discord.py` was not available in that validation environment; they do not validate live command registration. Live acceptance testing is still necessary for Discord permissions, transcript attachments, invite attribution, and the actual deployment environment. The current Supabase PostgreSQL deployment has been live-tested; validate any different PostgreSQL provider separately.
