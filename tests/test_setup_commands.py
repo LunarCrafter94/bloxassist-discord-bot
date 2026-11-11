@@ -10,8 +10,8 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 try:
-    from bloxfruits_helper_credit_bot.bot_client import CreateBot
-    from bloxfruits_helper_credit_bot.settings import RuntimeSettings
+    from bloxassist_discord_bot.bot_client import CreateBot
+    from bloxassist_discord_bot.settings import RuntimeSettings
 except ModuleNotFoundError as error:
     if error.name != "discord":
         raise
@@ -21,7 +21,7 @@ except ModuleNotFoundError as error:
 
 class SetupCommandTests(unittest.TestCase):
     def test_invite_reward_messages_use_real_line_breaks(self):
-        sourcePath = SOURCE_ROOT / "bloxfruits_helper_credit_bot" / "bot_client.py"
+        sourcePath = SOURCE_ROOT / "bloxassist_discord_bot" / "bot_client.py"
         source = sourcePath.read_text(encoding="utf-8")
         self.assertIn('rewardDescription += f"\\n**', source)
         self.assertIn('dmText += f"\\n**', source)

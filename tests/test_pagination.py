@@ -12,7 +12,7 @@ if str(SOURCE_ROOT) not in sys.path:
 
 try:
     import discord
-    from bloxfruits_helper_credit_bot.pagination import EphemeralPaginator
+    from bloxassist_discord_bot.pagination import EphemeralPaginator
 except ModuleNotFoundError as error:
     if error.name != "discord":
         raise
@@ -126,7 +126,7 @@ class EphemeralPaginatorTests(unittest.IsolatedAsyncioTestCase):
         view, _ = self.make_view()
 
         with patch(
-            "bloxfruits_helper_credit_bot.pagination.EditEphemeralOriginalResponse",
+            "bloxassist_discord_bot.pagination.EditEphemeralOriginalResponse",
             new_callable=AsyncMock,
         ) as edit_response:
             await view.on_timeout()

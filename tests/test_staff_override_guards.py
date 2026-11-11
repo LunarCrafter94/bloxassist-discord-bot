@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "source-files" / "bloxfruits_helper_credit_bot"
+SOURCE = ROOT / "source-files" / "bloxassist_discord_bot"
 
 
 class StaffOverrideGuardTests(unittest.TestCase):

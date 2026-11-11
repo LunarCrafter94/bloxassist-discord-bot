@@ -11,7 +11,7 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "source-files"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from bloxfruits_helper_credit_bot.database.guild_database import _PostgresDialectConnection
+from bloxassist_discord_bot.database.guild_database import _PostgresDialectConnection
 
 
 class _Cursor:

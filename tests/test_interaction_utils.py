@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 
-from bloxfruits_helper_credit_bot.interaction_utils import (
+from bloxassist_discord_bot.interaction_utils import (
     EditEphemeralOriginalResponse,
     SendEphemeralResponse,
 )
@@ -25,7 +25,7 @@ class InteractionResponseTests(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message = AsyncMock()
 
         with patch(
-            "bloxfruits_helper_credit_bot.interaction_utils.ScheduleEphemeralOriginalDeletion"
+            "bloxassist_discord_bot.interaction_utils.ScheduleEphemeralOriginalDeletion"
         ):
             await SendEphemeralResponse(interaction, "No pagination needed.", view=None)
 
@@ -45,7 +45,7 @@ class InteractionResponseTests(unittest.IsolatedAsyncioTestCase):
         interaction.edit_original_response = AsyncMock(side_effect=missing_message)
 
         with patch(
-            "bloxfruits_helper_credit_bot.interaction_utils.ScheduleEphemeralOriginalDeletion"
+            "bloxassist_discord_bot.interaction_utils.ScheduleEphemeralOriginalDeletion"
         ) as schedule:
             result = await EditEphemeralOriginalResponse(interaction, content="finished")
 

@@ -68,7 +68,7 @@ class PostgresMigrationCoverageTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            "from bloxfruits_helper_credit_bot.ticket_messages import DEFAULT_TICKET_WELCOME_MESSAGE",
+            "from bloxassist_discord_bot.ticket_messages import DEFAULT_TICKET_WELCOME_MESSAGE",
             source,
         )
 

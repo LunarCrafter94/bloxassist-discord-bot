@@ -10,8 +10,8 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "source-files"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from bloxfruits_helper_credit_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES
-from bloxfruits_helper_credit_bot.database import DatabaseManager
+from bloxassist_discord_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES
+from bloxassist_discord_bot.database import DatabaseManager
 
 
 class PerGuildDatabaseTests(unittest.TestCase):
@@ -193,7 +193,7 @@ class PerGuildDatabaseTests(unittest.TestCase):
         self.assertEqual(int(fourth["ticket_number"]), 4)
         self.assertEqual(int(fourth["ticket_sequence"]), 4)
 
-        from bloxfruits_helper_credit_bot.ticket_numbers import TicketChannelLabelFromRow, TicketLabelFromRow
+        from bloxassist_discord_bot.ticket_numbers import TicketChannelLabelFromRow, TicketLabelFromRow
         self.assertEqual(TicketChannelLabelFromRow(fourth), "001")
         self.assertEqual(TicketLabelFromRow(fourth), "004")
 
@@ -230,7 +230,7 @@ class PerGuildDatabaseTests(unittest.TestCase):
             self.assertEqual((status, amount), ("refunded", 0))
         self.assertEqual(numbers[:3], [1, 2, 3])
         self.assertEqual(numbers[98:101], [99, 100, 101])
-        from bloxfruits_helper_credit_bot.ticket_numbers import TicketLabelFromRow
+        from bloxassist_discord_bot.ticket_numbers import TicketLabelFromRow
         firstHundredth = self.guildA.GetTicketById(100)
         hundredFirst = self.guildA.GetTicketById(101)
         self.assertEqual(TicketLabelFromRow(firstHundredth), "100")
@@ -292,7 +292,7 @@ class PerGuildDatabaseTests(unittest.TestCase):
         )
         self.guildA = self.databaseManager.ForServer(111111111111111111)
 
-        from bloxfruits_helper_credit_bot.ticket_numbers import TicketLabelFromRow
+        from bloxassist_discord_bot.ticket_numbers import TicketLabelFromRow
         legacyLabels = [TicketLabelFromRow(self.guildA.GetTicketById(ticketId)) for ticketId in legacyTicketIds]
         self.assertEqual(legacyLabels, ["001", "002", "001"])
         self.assertEqual(self.guildA.GetSetting("next_ticket_sequence"), "4")
@@ -880,7 +880,7 @@ class PerGuildDatabaseTests(unittest.TestCase):
         finally:
             legacyConnection.close()
 
-        from bloxfruits_helper_credit_bot.database.guild_database import GuildDatabase
+        from bloxassist_discord_bot.database.guild_database import GuildDatabase
 
         legacyDatabase = GuildDatabase(legacyPath, guildId=333333333333333333)
         try:

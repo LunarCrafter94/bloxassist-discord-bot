@@ -10,7 +10,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 try:
-    from bloxfruits_helper_credit_bot.invites.invite_events import FormatInviteEventCountdown
+    from bloxassist_discord_bot.invites.invite_events import FormatInviteEventCountdown
 except ModuleNotFoundError as error:
     if error.name != "discord":
         raise

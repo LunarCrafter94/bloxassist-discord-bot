@@ -7,8 +7,8 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "source-files"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from bloxfruits_helper_credit_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES
-from bloxfruits_helper_credit_bot.database import DatabaseManager
+from bloxassist_discord_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES
+from bloxassist_discord_bot.database import DatabaseManager
 
 
 class Phase4And5DatabaseTests(unittest.TestCase):

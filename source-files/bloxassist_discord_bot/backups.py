@@ -110,7 +110,7 @@ class PerServerBackupService:
 
     def _BuildManifest(self, serverId: int, database) -> dict[str, Any]:
         return {
-            "format": "bloxfruits-helper-credit-bot-per-server-backup-v1",
+            "format": "bloxassist-discord-bot-per-server-backup-v1",
             "server_id": int(serverId),
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "backend": self.databaseManager.backend,

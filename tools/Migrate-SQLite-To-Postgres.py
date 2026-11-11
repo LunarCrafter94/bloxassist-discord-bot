@@ -16,9 +16,9 @@ SOURCE_ROOT = ROOT / "source-files"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from bloxfruits_helper_credit_bot.database import DatabaseManager  # noqa: E402
-from bloxfruits_helper_credit_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES, LoadRuntimeSettings  # noqa: E402
-from bloxfruits_helper_credit_bot.ticket_messages import DEFAULT_TICKET_WELCOME_MESSAGE  # noqa: E402
+from bloxassist_discord_bot.database import DatabaseManager  # noqa: E402
+from bloxassist_discord_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES, LoadRuntimeSettings  # noqa: E402
+from bloxassist_discord_bot.ticket_messages import DEFAULT_TICKET_WELCOME_MESSAGE  # noqa: E402
 
 TABLES = (
     "users",

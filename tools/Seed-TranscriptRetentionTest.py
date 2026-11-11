@@ -21,8 +21,8 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from dotenv import load_dotenv
-from bloxfruits_helper_credit_bot.database import DatabaseManager
-from bloxfruits_helper_credit_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES
+from bloxassist_discord_bot.database import DatabaseManager
+from bloxassist_discord_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES
 
 FIXTURE_PREFIX = "BLOXASSIST_RETENTION_TEST::"
 MESSAGE_PREFIX = "BLOXASSIST_TEST_TRANSCRIPT"

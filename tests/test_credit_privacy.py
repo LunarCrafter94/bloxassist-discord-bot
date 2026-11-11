@@ -11,7 +11,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 try:
-    from bloxfruits_helper_credit_bot import bot_client
+    from bloxassist_discord_bot import bot_client
 except ModuleNotFoundError as error:
     if error.name != "discord":
         raise
@@ -100,7 +100,7 @@ class CreditPrivacyTests(unittest.TestCase):
         )
 
     def test_credits_command_only_queries_and_displays_debt_after_authorization(self):
-        sourceRoot = Path(__file__).resolve().parents[1] / "source-files" / "bloxfruits_helper_credit_bot"
+        sourceRoot = Path(__file__).resolve().parents[1] / "source-files" / "bloxassist_discord_bot"
         botText = (sourceRoot / "bot_client.py").read_text(encoding="utf-8")
         creditsBody = botText.split("async def Credits(", 1)[1].split(
             '@bot.tree.command(name="repay-debt"', 1

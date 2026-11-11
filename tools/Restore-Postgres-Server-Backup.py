@@ -18,8 +18,8 @@ SOURCE_ROOT = ROOT / "source-files"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from bloxfruits_helper_credit_bot.database import DatabaseManager  # noqa: E402
-from bloxfruits_helper_credit_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES, LoadRuntimeSettings  # noqa: E402
+from bloxassist_discord_bot.database import DatabaseManager  # noqa: E402
+from bloxassist_discord_bot.settings import DEFAULT_JOIN_CREDITS, DEFAULT_SERVICES, LoadRuntimeSettings  # noqa: E402
 
 TABLES = (
     "users",
@@ -81,7 +81,7 @@ def main() -> int:
         print(f"Could not read or decrypt the backup: {exc}", file=sys.stderr)
         return 2
 
-    if manifest.get("format") != "bloxfruits-helper-credit-bot-per-server-backup-v1":
+    if manifest.get("format") not in {"bloxassist-discord-bot-per-server-backup-v1", "bloxfruits-helper-credit-bot-per-server-backup-v1"}:  # Accept pre-rename backups.
         print("Unrecognized backup format; nothing changed.", file=sys.stderr)
         return 2
     if int(manifest.get("server_id", -1)) != args.server_id or payload.get("schema") != f"server_{args.server_id}":

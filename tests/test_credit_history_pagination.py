@@ -11,7 +11,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 try:
-    from bloxfruits_helper_credit_bot.credits.credit_history_view import (
+    from bloxassist_discord_bot.credits.credit_history_view import (
         CREDIT_HISTORY_PAGE_SIZE,
         BuildCreditHistoryEmbed,
         CreditHistoryView,

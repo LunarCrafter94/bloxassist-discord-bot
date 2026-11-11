@@ -5,9 +5,9 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_CLIENT = ROOT / "source-files" / "bloxfruits_helper_credit_bot" / "bot_client.py"
-CREDIT_HISTORY_VIEW = ROOT / "source-files" / "bloxfruits_helper_credit_bot" / "credits" / "credit_history_view.py"
-DASHBOARD_VIEWS = ROOT / "source-files" / "bloxfruits_helper_credit_bot" / "admin" / "dashboard_views.py"
+BOT_CLIENT = ROOT / "source-files" / "bloxassist_discord_bot" / "bot_client.py"
+CREDIT_HISTORY_VIEW = ROOT / "source-files" / "bloxassist_discord_bot" / "credits" / "credit_history_view.py"
+DASHBOARD_VIEWS = ROOT / "source-files" / "bloxassist_discord_bot" / "admin" / "dashboard_views.py"
 
 
 class HistoryCommandPaginationWiringTests(unittest.TestCase):

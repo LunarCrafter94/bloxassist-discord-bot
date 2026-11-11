@@ -9,7 +9,7 @@ if str(SOURCE_ROOT) not in sys.path:
 
 import unittest
 
-from bloxfruits_helper_credit_bot.tickets.ticket_views import _DeleteTranscriptMessage
+from bloxassist_discord_bot.tickets.ticket_views import _DeleteTranscriptMessage
 
 
 class StrictPartialMessage:

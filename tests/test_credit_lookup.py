@@ -11,7 +11,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 try:
-    from bloxfruits_helper_credit_bot import bot_client
+    from bloxassist_discord_bot import bot_client
 except ModuleNotFoundError as error:
     if error.name != "discord":
         raise
