@@ -72,7 +72,7 @@ Each server uses `data/servers/<server_id>/blox_fruits_credit_system.sqlite3`. T
 
 ### PostgreSQL
 
-BloxAssist's PostgreSQL backend has been live-tested with Supabase. The deployed bot has been operating against Supabase PostgreSQL for approximately two weeks as of November 11, 2026. The application creates an isolated schema named `server_<server_id>` for each Discord server. This validates the current Supabase deployment and exercised application workload; it does not establish broad production readiness at scale or automatically validate other PostgreSQL providers.
+BloxAssist's PostgreSQL backend has been live-tested with Supabase. The deployed bot has been operating against Supabase PostgreSQL for approximately three weeks as of November 11, 2026. The application creates an isolated schema named `server_<server_id>` for each Discord server. This validates the current Supabase deployment and exercised application workload; it does not establish broad production readiness at scale or automatically validate other PostgreSQL providers.
 
 Put the connection URL in `DATABASE_URL` using the hosting provider's secret/environment settings or a private local `credentials.env` file. Never commit the URL or its password.
 
