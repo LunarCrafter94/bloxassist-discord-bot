@@ -43,7 +43,7 @@ BACKUP_ENCRYPTION_PASSWORD=
 - `GUILD_ID` is optional and controls development slash-command synchronization only.
 - `DATABASE_BACKEND` is `sqlite` by default or `postgresql` when using a configured remote PostgreSQL database.
 - `DATABASE_URL` contains a database password and must not be committed.
-- `BACKUP_DISCORD_USER_ID` and `BACKUP_ENCRYPTION_PASSWORD` are both required to enable the hourly encrypted per-server ZIP backups.
+- `BACKUP_DISCORD_USER_ID` and `BACKUP_ENCRYPTION_PASSWORD` are both required to enable the five-hourly encrypted per-server ZIP backups.
 
 The loader prefers `private-configs/credentials.env`. `runtime.env` and the old `tokens.env` path remain as compatibility fallbacks for existing installations, but new installs should use `credentials.env`. On a managed host such as Nylix, configure secrets through its environment/secret settings when possible instead of storing a real secret file in a code deployment.
 
@@ -81,12 +81,13 @@ Put the connection URL in `DATABASE_URL` using the hosting provider's secret/env
 The migration utility is only for an existing SQLite deployment that is intentionally moving to PostgreSQL. It is not needed by an installation that already uses PostgreSQL. With the bot stopped and the current SQLite files available under `data/servers/`, run:
 
 ```powershell
-.\.venv\Scripts\python.exe tools\\Migrate-SQLite-To-Postgres.py
+.\.venv\Scripts\python.exe tools\Migrate-SQLite-To-Postgres.py
 ```
 
 The script prompts for `MIGRATE`, checks that each target schema contains only the known default seed settings/service catalog, preserves source SQLite files, imports server tables in dependency order, resets serial sequences, and checks row counts. It refuses to merge into non-empty or customized target schemas. Do not run it against an already-populated live PostgreSQL deployment.
 
 For a SQLite-to-PostgreSQL cutover, compare user counts, total credits, ticket counts by status, transaction counts/totals, service catalog, settings keys, and transcript/report rows. Test with a development Discord server before switching the production token. Do not run SQLite and PostgreSQL instances simultaneously with the same Discord bot token against production: simultaneous writes could diverge their data.
+
 ## 4. Five-hourly per-server encrypted DM backups
 
 Configure `BACKUP_DISCORD_USER_ID` to the numeric Discord user ID of the recipient and `BACKUP_ENCRYPTION_PASSWORD` to a strong password. The service starts a backup cycle after the client is ready, then repeats every five hours. It sends a different ZIP for each server:
