@@ -1,6 +1,6 @@
-# Release history and changelog The dated project and hosting milestones are recorded in [`project_timeline.md`](project_timeline.md).
+# Release history and changelog
 
-This page summarizes published releases and their user-facing changes. It is the maintained release summary linked from the root [README](../README.md). Older installation and changelog notes remain archived in [`history/releases/historical-installation-and-changelogs.zip`](history/releases/historical-installation-and-changelogs.zip); use the current documentation for current setup instructions.
+This page summarizes published releases and their user-facing changes. It is the maintained release summary linked from the root [README](../README.md). Dated development and hosting milestones are recorded in [`project_timeline.md`](project_timeline.md). Older installation and changelog notes remain archived in [`history/releases/historical-installation-and-changelogs.zip`](history/releases/historical-installation-and-changelogs.zip); use the current documentation for current setup instructions.
 
 ## v0.10.0 — Debt repayment, staff history, and server analytics
 
