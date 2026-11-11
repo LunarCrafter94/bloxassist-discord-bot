@@ -10,7 +10,7 @@ SQLite path:
 data/servers/<server_id>/blox_fruits_credit_system.sqlite3
 ```
 
-PostgreSQL path: one schema per Discord server, named `server_<server_id>`, inside the database URL configured through `DATABASE_URL`. The remote backend is newly introduced and remains experimental until tested against the chosen live provider.
+PostgreSQL path: one schema per Discord server, named `server_<server_id>`, inside the database URL configured through `DATABASE_URL`. The current deployed bot uses Supabase PostgreSQL with a separate schema for each Discord server. This is live-tested with the current deployment; other PostgreSQL providers and broad multi-community scale have not been established by that testing.
 
 The database tables hold accounts/balances (`users`), tickets and transcript references (`tickets`), balance/audit ledger rows (`transactions`), per-server configuration (`settings`), service/event catalog (`services`), timed invite events (`invite_events`), unique invite rewards (`invite_rewards`), and scam reports/reviews (`scam_reports`).
 
