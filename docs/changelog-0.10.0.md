@@ -59,7 +59,7 @@
 - Added regression coverage ensuring the PostgreSQL restore table list matches the full application schema and that foreign-key-dependent rows are deleted in a safe order.
 
 - Live PostgreSQL restore QA passed on November 4, 2026: the encrypted 12:39:20 UTC backup for server `1560356320954294313` was decrypted, validated, and applied to schema `server_1560356320954294313`. All 11 tables were restored and row counts verified (165 rows total); serial sequences were reset by the restore utility. A subsequent live `/diagnostics` confirmed PostgreSQL connectivity, queryable core tables, and the configured `#ticket-audit` channel. The 128-test suite also passed locally (9.303 seconds) after the restore utility update.
-- **Live Supabase PostgreSQL deployment:** As of November 11, 2026, the deployed BloxAssist bot has been operating on Supabase PostgreSQL for approximately two weeks. The application uses a separate schema for each Discord server. This supplements the restore QA above with live operation of the actual bot workload; it does not claim broad validation across multiple providers or large-scale deployments.
+- **Live Supabase PostgreSQL deployment:** As of November 11, 2026, the deployed BloxAssist bot has been operating on Supabase PostgreSQL for approximately three weeks. The application uses a separate schema for each Discord server. This supplements the restore QA above with live operation of the actual bot workload; it does not claim broad validation across multiple providers or large-scale deployments.
 
 ## Service catalog cleanup
 
