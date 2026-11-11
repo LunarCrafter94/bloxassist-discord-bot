@@ -1,6 +1,6 @@
-# Release history and changelog
+# Release history and changelog The dated project and hosting milestones are recorded in [`project_timeline.md`](project_timeline.md).
 
-This page summarizes the current development release and its user-facing changes. It is the maintained release summary linked from the root [README](../README.md). Older installation and changelog notes remain archived in [`history/releases/historical-installation-and-changelogs.zip`](history/releases/historical-installation-and-changelogs.zip); use the current documentation for current setup instructions.
+This page summarizes published releases and their user-facing changes. It is the maintained release summary linked from the root [README](../README.md). Older installation and changelog notes remain archived in [`history/releases/historical-installation-and-changelogs.zip`](history/releases/historical-installation-and-changelogs.zip); use the current documentation for current setup instructions.
 
 ## v0.10.0 — Debt repayment, staff history, and server analytics
 
@@ -17,7 +17,7 @@ Full feature inventory: [`changelog-0.10.0.md`](changelog-0.10.0.md).
 - Expanded PostgreSQL backup-restore coverage and regression tests.
 - Removed the redundant Race Awakening entry from the default service catalog because it duplicates V4 Trials. Existing guild configurations are preserved.
 
-> **Release status:** v0.10.0 is undergoing final release preparation and has not yet been published. The candidate passed 173 automated tests and extensive live acceptance testing in a separate Discord test server on November 10, 2026. BloxAssist remains in beta, with limited deployment scope.
+> **Release status:** v0.10.0 was published as a GitHub pre-release on November 10, 2026, and announced in the real server's `#〔📢〕bot-announcements` channel at 8:13 AM on November 11, 2026 (the export shows a time-only timestamp for that post). The candidate passed 173 automated tests and extensive live acceptance testing in a separate Discord test server on November 10, 2026. BloxAssist remains in beta, with limited deployment scope.
 
 ---
 
