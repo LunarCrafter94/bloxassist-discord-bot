@@ -16,7 +16,7 @@ The early BF World Credit Test Bot update numbers are historical announcement la
 - **October 20, 2026, 8:47 PM — Semi-permanent bot hosting announced.** The channel post named control.heavencloud.in as the host and Supabase as the data store.
 - **October 20, 2026, 9:56 PM — BloxAssist v0.8.0 tester reports opened.** A testing form and instructions were shared with testers.
 - **October 21, 2026, 1:15 PM — Bot-Hosting.net deployment announced.** The post stated that the bot was hosted on Bot-Hosting.net and its data was stored in Supabase. It also noted the free-host renewal requirement as understood at that time.
-- **October 21, 2026, 7:59:19 PM — GitHub v0.9.0 pre-release published.** This timestamp comes from the GitHub release record (14:59:19 UTC). The real-server channel then posted the v0.9.0 development update at 9:57 PM, highlighting credit debt, inviter leave penalties, expanded audit logs, and stronger owner-only credit-management permissions.
+- **October 21, 2026, 7:59:19 PM — GitHub v0.9.0 pre-release published.** This timestamp comes from the GitHub release record (11:59:19 UTC). The real-server channel then posted the v0.9.0 development update at 9:57 PM, highlighting credit debt, inviter leave penalties, expanded audit logs, and stronger owner-only credit-management permissions.
 
 ## November 2026 — v0.10.0
 
