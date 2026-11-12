@@ -351,6 +351,10 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             # Capture the active event at join time. Leave-penalty eligibility can
             # then distinguish members invited during an event from ordinary invites.
             event = guildDatabase.GetActiveInviteEvent()
+            eventIsInProgress = (
+                event is not None
+                and str(event["ends_at"]) > discord.utils.utcnow().replace(microsecond=0).isoformat()
+            )
             repeatLeavePenalty = (
                 guildDatabase.GetSetting("invite_leave_penalty_repeat_on_rejoin", "false") or "false"
             ).lower() in {"true", "1", "yes", "on"}
@@ -361,7 +365,7 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 str(usedInvite.code),
                 repeatOnRejoin=repeatLeavePenalty,
                 joinedAt=joinedAt,
-                inviteEventId=int(event["event_id"]) if event is not None else None,
+                inviteEventId=int(event["event_id"]) if eventIsInProgress else None,
             )
             if event is None:
                 return
