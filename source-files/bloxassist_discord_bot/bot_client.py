@@ -348,8 +348,9 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 return
             if usedInvite is None or usedInvite.inviter is None or usedInvite.inviter.bot:
                 return
-            # Save attribution even outside an active reward event so leave penalties
-            # can only ever affect the inviter actually identified for this member.
+            # Capture the active event at join time. Leave-penalty eligibility can
+            # then distinguish members invited during an event from ordinary invites.
+            event = guildDatabase.GetActiveInviteEvent()
             repeatLeavePenalty = (
                 guildDatabase.GetSetting("invite_leave_penalty_repeat_on_rejoin", "false") or "false"
             ).lower() in {"true", "1", "yes", "on"}
@@ -360,8 +361,8 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 str(usedInvite.code),
                 repeatOnRejoin=repeatLeavePenalty,
                 joinedAt=joinedAt,
+                inviteEventId=int(event["event_id"]) if event is not None else None,
             )
-            event = guildDatabase.GetActiveInviteEvent()
             if event is None:
                 return
             previousDebt = guildDatabase.GetCreditDebt(usedInvite.inviter.id)
@@ -407,6 +408,11 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             if attribution is None:
                 # No reliable invite attribution means no penalty; never guess or deduct
                 # from unrelated members.
+                return
+            penaltyScope = (guildDatabase.GetSetting("invite_leave_penalty_scope", "all_invites") or "all_invites").strip().lower()
+            if penaltyScope == "active_event_only" and attribution["invite_event_id"] is None:
+                # Eligibility is based on whether the member joined during an active
+                # Invite Reward Event, not whether an event is still active on departure.
                 return
             inviterId = int(attribution["inviter_user_id"])
             if inviterId == int(member.id) or (self.user is not None and inviterId == self.user.id):

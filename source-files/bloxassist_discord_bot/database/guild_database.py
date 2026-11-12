@@ -248,6 +248,7 @@ class GuildDatabase:
                 penalty_applied INTEGER NOT NULL DEFAULT 0 CHECK (penalty_applied IN (0, 1)),
                 join_cycle INTEGER NOT NULL DEFAULT 1,
                 joined_at TEXT NOT NULL DEFAULT '',
+                invite_event_id INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """,
@@ -300,6 +301,7 @@ class GuildDatabase:
             attributionMigrations = {
                 "join_cycle": "ALTER TABLE invite_attributions ADD COLUMN join_cycle INTEGER NOT NULL DEFAULT 1",
                 "joined_at": "ALTER TABLE invite_attributions ADD COLUMN joined_at TEXT NOT NULL DEFAULT ''",
+                "invite_event_id": "ALTER TABLE invite_attributions ADD COLUMN invite_event_id INTEGER",
             }
             for columnName, migrationSql in attributionMigrations.items():
                 if columnName not in attributionColumns:
@@ -658,8 +660,9 @@ class GuildDatabase:
         *,
         repeatOnRejoin: bool = False,
         joinedAt: str | None = None,
+        inviteEventId: int | None = None,
     ) -> bool:
-        """Remember the inviter and, optionally, re-arm one penalty per distinct join cycle.
+        """Remember the inviter, event provenance, and optional per-join-cycle penalty eligibility.
 
         The Discord member's joined_at timestamp identifies a join cycle. Repeated
         delivery of the same join event therefore cannot re-arm an already-used
@@ -670,19 +673,22 @@ class GuildDatabase:
         if invitedId <= 0 or inviterId <= 0 or invitedId == inviterId:
             return False
         joinedAtText = str(joinedAt or "").strip()[:80]
+        eventId = int(inviteEventId) if inviteEventId is not None else None
+        if eventId is not None and eventId <= 0:
+            eventId = None
         with self.databaseLock:
             try:
                 self.connection.execute("BEGIN IMMEDIATE" if self.backend == "sqlite" else "BEGIN")
                 cursor = self.connection.execute(
                     """INSERT INTO invite_attributions
-                       (invited_user_id, inviter_user_id, invite_code, join_cycle, joined_at)
-                       VALUES (?, ?, ?, 1, ?)
+                       (invited_user_id, inviter_user_id, invite_code, join_cycle, joined_at, invite_event_id)
+                       VALUES (?, ?, ?, 1, ?, ?)
                        ON CONFLICT(invited_user_id) DO NOTHING""",
-                    (invitedId, inviterId, str(inviteCode)[:100], joinedAtText),
+                    (invitedId, inviterId, str(inviteCode)[:100], joinedAtText, eventId),
                 )
                 inserted = cursor.rowcount == 1
 
-                lockSql = "SELECT join_cycle, joined_at FROM invite_attributions WHERE invited_user_id = ?"
+                lockSql = "SELECT join_cycle, joined_at, invite_event_id FROM invite_attributions WHERE invited_user_id = ?"
                 if self.backend == "postgresql":
                     lockSql += " FOR UPDATE"
                 current = self.connection.execute(lockSql, (invitedId,)).fetchone()
@@ -691,9 +697,9 @@ class GuildDatabase:
                         self.connection.execute(
                             """UPDATE invite_attributions
                                SET inviter_user_id = ?, invite_code = ?, penalty_applied = 0,
-                                   join_cycle = join_cycle + 1, joined_at = ?
+                                   join_cycle = join_cycle + 1, joined_at = ?, invite_event_id = ?
                                WHERE invited_user_id = ?""",
-                            (inviterId, str(inviteCode)[:100], joinedAtText, invitedId),
+                            (inviterId, str(inviteCode)[:100], joinedAtText, eventId, invitedId),
                         )
                         inserted = True
                     else:

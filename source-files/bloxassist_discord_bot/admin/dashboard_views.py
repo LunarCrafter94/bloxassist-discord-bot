@@ -8,6 +8,7 @@ import unicodedata
 
 import discord
 
+from ..audit import SendAuditLog
 from ..database import DatabaseManager, GuildDatabase
 from ..interaction_utils import SendEphemeralResponse
 from ..invites.invite_events import FormatInviteEventCountdown
@@ -301,12 +302,19 @@ def BuildDashboardEmbed(guild: discord.Guild, guildDatabase: GuildDatabase) -> d
     leavePenalty = int(guildDatabase.GetSetting("invite_leave_penalty_credits", "0") or "0")
     repeatLeavePenalty = (guildDatabase.GetSetting("invite_leave_penalty_repeat_on_rejoin", "false") or "false").lower() in {"true", "1", "yes", "on"}
     repeatPolicy = "Every attributed rejoin/leave cycle" if repeatLeavePenalty else "Once per invited member"
+    penaltyScope = (guildDatabase.GetSetting("invite_leave_penalty_scope", "all_invites") or "all_invites").strip().lower()
+    penaltyScopeText = (
+        "Only members who joined during an active invite event"
+        if penaltyScope == "active_event_only"
+        else "All attributed invites, including outside active events"
+    )
     embed.add_field(
         name="Inviter leave penalty",
         value=(
             f"**{leavePenalty:,} credits** per attributed departure\n"
             f"Repeat after rejoin: **{'Enabled' if repeatLeavePenalty else 'Disabled'}**\n"
             f"Policy: {repeatPolicy}\n"
+            f"Eligibility: {penaltyScopeText}\n"
             "Set amount to **0** to disable. Only the recorded inviter is penalized."
         ),
         inline=True,
@@ -496,20 +504,29 @@ class DashboardView(discord.ui.View):
         if not await EnsureDashboardAccess(interaction, self.databaseManager):
             return
         db = self.databaseManager.ForServer(interaction.guild_id)
-        await interaction.response.send_modal(InviteSettingsModal(self.databaseManager, db))
+        enabled = (db.GetSetting("invite_rewards_enabled", "false") or "false").strip().lower() in {"true", "1", "yes", "on"}
+        await SendEphemeralResponse(
+            interaction,
+            f"**Invite rewards:** {'Enabled' if enabled else 'Disabled'}. Use the dropdown to change this setting, or edit the reward amount and event duration.",
+            view=InviteRewardSettingsView(self.databaseManager, db),
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="Inviter Leave Penalty", emoji="⚖️", style=discord.ButtonStyle.danger, custom_id="bf:dashboard:invite_leave_penalty", row=4)
     async def InviteLeavePenalty(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if interaction.guild is None or interaction.guild.owner_id != interaction.user.id:
+        if interaction.guild is None or interaction.guild_id is None or interaction.guild.owner_id != interaction.user.id:
             await SendEphemeralResponse(interaction, "Only the server owner can change inviter leave penalties.", ephemeral=True)
             return
         db = self.databaseManager.ForServer(interaction.guild_id)
-        await interaction.response.send_modal(
-            InviteLeavePenaltyModal(
-                self.databaseManager,
-                db.GetSetting("invite_leave_penalty_credits", "0") or "0",
-                db.GetSetting("invite_leave_penalty_repeat_on_rejoin", "false") or "false",
-            )
+        amount = int(db.GetSetting("invite_leave_penalty_credits", "0") or "0")
+        repeatEnabled = (db.GetSetting("invite_leave_penalty_repeat_on_rejoin", "false") or "false").strip().lower() in {"true", "1", "yes", "on"}
+        scope = (db.GetSetting("invite_leave_penalty_scope", "all_invites") or "all_invites").strip().lower()
+        scopeText = "Only members who joined during an active invite event" if scope == "active_event_only" else "All attributed invites, including outside active events"
+        await SendEphemeralResponse(
+            interaction,
+            f"**Penalty amount:** {amount:,} credits per attributed departure\n**Repeat policy:** {'Every rejoin/leave cycle' if repeatEnabled else 'Once per invited member'}\n**Eligibility:** {scopeText}\n\nUse the dropdowns to save policy changes. Use the button to edit the amount.",
+            view=InviteLeavePenaltySettingsView(self.databaseManager, db),
+            ephemeral=True,
         )
 
     @discord.ui.button(label="Help Center Channel", emoji="📣", style=discord.ButtonStyle.primary, custom_id="bf:dashboard:help_channel", row=2)
@@ -661,7 +678,131 @@ class TicketWelcomeMessageModal(discord.ui.Modal, title="Ticket Welcome Message"
         await RefreshDashboardMessage(interaction.guild, db, self.databaseManager)
 
 
-class InviteLeavePenaltyModal(discord.ui.Modal, title="Inviter Leave Penalty"):
+class InvitePenaltyRepeatSelect(discord.ui.Select):
+    def __init__(self, currentRepeat: str):
+        repeatEnabled = str(currentRepeat).strip().lower() in {"true", "1", "yes", "on"}
+        options = [
+            discord.SelectOption(
+                label="Once per invited member",
+                value="false",
+                description="An invited member can trigger at most one leave penalty.",
+                default=not repeatEnabled,
+            ),
+            discord.SelectOption(
+                label="Every rejoin/leave cycle",
+                value="true",
+                description="A newly attributed rejoin can re-arm another leave penalty.",
+                default=repeatEnabled,
+            ),
+        ]
+        super().__init__(
+            placeholder="Choose the repeat-after-rejoin policy",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+            custom_id="bf:settings:invite_penalty_repeat",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, InviteLeavePenaltySettingsView):
+            await SendEphemeralResponse(interaction, "This settings menu has expired. Reopen it from the Admin Dashboard.", ephemeral=True)
+            return
+        if interaction.guild is None or interaction.guild_id is None or interaction.guild.owner_id != interaction.user.id:
+            await SendEphemeralResponse(interaction, "Only the server owner can change inviter leave penalties.", ephemeral=True)
+            return
+        db = view.databaseManager.ForServer(interaction.guild_id)
+        repeatEnabled = self.values[0] == "true"
+        db.SetSetting("invite_leave_penalty_repeat_on_rejoin", "true" if repeatEnabled else "false")
+        await interaction.response.edit_message(
+            content=f"✅ Repeat policy saved: **{'Every rejoin/leave cycle' if repeatEnabled else 'Once per invited member'}**. The other settings remain unchanged.",
+            view=InviteLeavePenaltySettingsView(view.databaseManager, db),
+        )
+        await RefreshDashboardMessage(interaction.guild, db, view.databaseManager)
+
+
+class InvitePenaltyScopeSelect(discord.ui.Select):
+    def __init__(self, currentScope: str):
+        scope = str(currentScope or "all_invites").strip().lower()
+        options = [
+            discord.SelectOption(
+                label="All attributed invites",
+                value="all_invites",
+                description="Apply even when no Invite Reward Event was active.",
+                default=scope != "active_event_only",
+            ),
+            discord.SelectOption(
+                label="Only during an active Invite Reward Event",
+                value="active_event_only",
+                description="Only members who joined while an event was active qualify.",
+                default=scope == "active_event_only",
+            ),
+        ]
+        super().__init__(
+            placeholder="Choose when invite leave penalties are eligible",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+            custom_id="bf:settings:invite_penalty_scope",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, InviteLeavePenaltySettingsView):
+            await SendEphemeralResponse(interaction, "This settings menu has expired. Reopen it from the Admin Dashboard.", ephemeral=True)
+            return
+        if interaction.guild is None or interaction.guild_id is None or interaction.guild.owner_id != interaction.user.id:
+            await SendEphemeralResponse(interaction, "Only the server owner can change inviter leave penalties.", ephemeral=True)
+            return
+        db = view.databaseManager.ForServer(interaction.guild_id)
+        scope = self.values[0]
+        db.SetSetting("invite_leave_penalty_scope", scope)
+        scopeText = (
+            "Only members who joined during an active Invite Reward Event"
+            if scope == "active_event_only"
+            else "All attributed invites, even when no Invite Reward Event was active"
+        )
+        await interaction.response.edit_message(
+            content=f"✅ Penalty eligibility saved: **{scopeText}**. This is based on the invitee's join time.",
+            view=InviteLeavePenaltySettingsView(view.databaseManager, db),
+        )
+        await RefreshDashboardMessage(interaction.guild, db, view.databaseManager)
+
+
+class InviteLeavePenaltySettingsView(discord.ui.View):
+    def __init__(self, databaseManager: DatabaseManager, guildDatabase: GuildDatabase):
+        super().__init__(timeout=180)
+        self.databaseManager = databaseManager
+        self.add_item(InvitePenaltyRepeatSelect(
+            guildDatabase.GetSetting("invite_leave_penalty_repeat_on_rejoin", "false") or "false"
+        ))
+        self.add_item(InvitePenaltyScopeSelect(
+            guildDatabase.GetSetting("invite_leave_penalty_scope", "all_invites") or "all_invites"
+        ))
+        self.add_item(InvitePenaltyAmountButton(databaseManager))
+
+
+class InvitePenaltyAmountButton(discord.ui.Button):
+    def __init__(self, databaseManager: DatabaseManager):
+        super().__init__(label="Edit Penalty Amount", style=discord.ButtonStyle.primary, row=2)
+        self.databaseManager = databaseManager
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.guild_id is None or interaction.guild.owner_id != interaction.user.id:
+            await SendEphemeralResponse(interaction, "Only the server owner can change inviter leave penalties.", ephemeral=True)
+            return
+        db = self.databaseManager.ForServer(interaction.guild_id)
+        await interaction.response.send_modal(
+            InvitePenaltyAmountModal(
+                self.databaseManager,
+                db.GetSetting("invite_leave_penalty_credits", "0") or "0",
+            )
+        )
+
+
+class InvitePenaltyAmountModal(discord.ui.Modal, title="Inviter Leave Penalty Amount"):
     amount = discord.ui.TextInput(
         label="Penalty per invited member (0 disables)",
         placeholder="0",
@@ -669,45 +810,26 @@ class InviteLeavePenaltyModal(discord.ui.Modal, title="Inviter Leave Penalty"):
         max_length=10,
         required=True,
     )
-    repeatOnRejoin = discord.ui.TextInput(
-        label="Repeat after each attributed rejoin? (yes/no)",
-        placeholder="no",
-        min_length=2,
-        max_length=5,
-        required=True,
-    )
 
-    def __init__(self, databaseManager: DatabaseManager, currentAmount: str, currentRepeat: str = "false"):
-        super().__init__()
+    def __init__(self, databaseManager: DatabaseManager, currentAmount: str):
+        super().__init__(timeout=180)
         self.databaseManager = databaseManager
         self.amount.default = str(currentAmount)
-        self.repeatOnRejoin.default = "yes" if str(currentRepeat).strip().lower() in {"true", "1", "yes", "on"} else "no"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or interaction.guild.owner_id != interaction.user.id:
+        if interaction.guild is None or interaction.guild_id is None or interaction.guild.owner_id != interaction.user.id:
             await SendEphemeralResponse(interaction, "Only the server owner can change inviter leave penalties.", ephemeral=True)
             return
         raw = str(self.amount.value).strip()
         if not raw.isdigit() or int(raw) > MAX_CREDITS:
             await SendEphemeralResponse(interaction, f"Enter a whole number from 0 to {MAX_CREDITS:,}.", ephemeral=True)
             return
-        repeatText = str(self.repeatOnRejoin.value).strip().lower()
-        if repeatText not in {"yes", "no", "true", "false", "on", "off", "1", "0"}:
-            await SendEphemeralResponse(interaction, "Use yes or no for the repeat-after-rejoin setting.", ephemeral=True)
-            return
-        repeatEnabled = repeatText in {"yes", "true", "on", "1"}
         db = self.databaseManager.ForServer(interaction.guild_id)
         db.SetSetting("invite_leave_penalty_credits", int(raw))
-        db.SetSetting("invite_leave_penalty_repeat_on_rejoin", "true" if repeatEnabled else "false")
         await SendEphemeralResponse(
             interaction,
-            f"✅ Inviter leave penalty saved: **{int(raw):,} credits** per attributed departure. "
-            + ("Penalties are disabled. " if int(raw) == 0 else "Only the recorded inviter can be penalized. ")
-            + (
-                "Repeat penalties are enabled for each newly attributed rejoin/leave cycle."
-                if repeatEnabled else
-                "Repeat penalties are disabled; each invited member can trigger at most one leave penalty."
-            ),
+            f"✅ Inviter leave penalty amount saved: **{int(raw):,} credits** per eligible departure. "
+            + ("Penalties are disabled." if int(raw) == 0 else "Only the recorded inviter is penalized."),
             ephemeral=True,
         )
         await RefreshDashboardMessage(interaction.guild, db, self.databaseManager)
@@ -771,60 +893,51 @@ class MaxHelpersModal(discord.ui.Modal, title="Maximum Helpers per Ticket"):
         await RefreshDashboardMessage(interaction.guild, db, self.databaseManager)
 
 
-class InviteSettingsModal(discord.ui.Modal, title="Invite Reward Defaults"):
-    enabled = discord.ui.TextInput(
-        label="Enable invite rewards? (yes/no)", placeholder="no", min_length=2, max_length=5
-    )
-    rewardCredits = discord.ui.TextInput(
-        label="Credits per eligible invite", placeholder="50", min_length=1, max_length=10
-    )
-    durationMinutes = discord.ui.TextInput(
-        label="Default event duration in minutes", placeholder="60", min_length=1, max_length=5
-    )
+class InviteRewardsEnabledSelect(discord.ui.Select):
+    def __init__(self, currentlyEnabled: bool):
+        options = [
+            discord.SelectOption(
+                label="Enabled",
+                value="true",
+                description="Allow staff to start Invite Reward Events.",
+                default=currentlyEnabled,
+            ),
+            discord.SelectOption(
+                label="Disabled",
+                value="false",
+                description="Do not allow new invite reward events.",
+                default=not currentlyEnabled,
+            ),
+        ]
+        super().__init__(
+            placeholder="Enable or disable invite rewards",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+            custom_id="bf:settings:invite_rewards_enabled",
+        )
 
-    def __init__(self, databaseManager: DatabaseManager, guildDatabase: GuildDatabase):
-        super().__init__(timeout=180)
-        self.databaseManager = databaseManager
-        self.enabled.default = guildDatabase.GetSetting("invite_rewards_enabled", "false") or "false"
-        self.rewardCredits.default = guildDatabase.GetSetting("invite_reward_credits", "50") or "50"
-        self.durationMinutes.default = guildDatabase.GetSetting("invite_duration_minutes", "60") or "60"
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        if not await EnsureDashboardAccess(interaction, self.databaseManager):
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, InviteRewardSettingsView):
+            await SendEphemeralResponse(interaction, "This settings menu has expired. Reopen it from the Admin Dashboard.", ephemeral=True)
             return
-        enabledText = str(self.enabled.value).strip().lower()
-        if enabledText not in {"yes", "no", "true", "false", "on", "off", "1", "0"}:
-            await SendEphemeralResponse(interaction, "Use yes or no for the enabled setting.", ephemeral=True)
+        if not await EnsureDashboardAccess(interaction, view.databaseManager):
             return
-        rewardText = str(self.rewardCredits.value).strip()
-        durationText = str(self.durationMinutes.value).strip()
-        if not rewardText.isdecimal() or int(rewardText) > MAX_CREDITS:
-            await SendEphemeralResponse(interaction, 
-                f"Reward credits must be a whole number from 0 to {MAX_CREDITS:,}.", ephemeral=True
-            )
-            return
-        if not durationText.isdecimal() or not 1 <= int(durationText) <= 10_080:
-            await SendEphemeralResponse(interaction, "Duration must be between 1 and 10080 minutes (7 days).", ephemeral=True)
-            return
-
-        isEnabled = enabledText in {"yes", "true", "on", "1"}
-        db = self.databaseManager.ForServer(interaction.guild_id)
+        db = view.databaseManager.ForServer(interaction.guild_id)
+        isEnabled = self.values[0] == "true"
         db.SetSetting("invite_rewards_enabled", "true" if isEnabled else "false")
-        db.SetSetting("invite_reward_credits", int(rewardText))
-        db.SetSetting("invite_duration_minutes", int(durationText))
         endedActiveEvent = None
         if not isEnabled:
-            # Turning off the global invite-reward switch also ends a live event, so
-            # joins after this change cannot receive rewards unexpectedly.
             endStatus, endedActiveEvent = db.EndInviteEvent(endedBy=interaction.user.id)
             if endStatus == "none_active":
                 endedActiveEvent = None
-        await SendEphemeralResponse(
-            interaction,
-            "✅ Invite reward settings saved. " + (
-                "The active event was ended because invite rewards were disabled. " if endedActiveEvent else ""
-            ) + "When enabled, staff can use `/invite-event start` to begin a timed event and `/invite-event end` to stop it early. Invite attribution requires the bot's Manage Server permission.",
-            ephemeral=True,
+        await interaction.response.edit_message(
+            content=f"✅ Invite rewards are now **{'Enabled' if isEnabled else 'Disabled'}**. "
+            + ("The active event was ended because invite rewards were disabled. " if endedActiveEvent else "")
+            + "Use Edit Reward Defaults to change the reward amount and default duration.",
+            view=InviteRewardSettingsView(view.databaseManager, db),
         )
         if endedActiveEvent is not None:
             auditEmbed = discord.Embed(
@@ -833,6 +946,69 @@ class InviteSettingsModal(discord.ui.Modal, title="Invite Reward Defaults"):
                 color=discord.Color.orange(), timestamp=discord.utils.utcnow(),
             )
             await SendAuditLog(interaction.guild, db, auditEmbed)
+        await RefreshDashboardMessage(interaction.guild, db, view.databaseManager)
+
+
+class InviteRewardSettingsView(discord.ui.View):
+    def __init__(self, databaseManager: DatabaseManager, guildDatabase: GuildDatabase):
+        super().__init__(timeout=180)
+        self.databaseManager = databaseManager
+        currentlyEnabled = (guildDatabase.GetSetting("invite_rewards_enabled", "false") or "false").strip().lower() in {"true", "1", "yes", "on"}
+        self.add_item(InviteRewardsEnabledSelect(currentlyEnabled))
+        self.add_item(InviteRewardDefaultsButton(databaseManager))
+
+
+class InviteRewardDefaultsButton(discord.ui.Button):
+    def __init__(self, databaseManager: DatabaseManager):
+        super().__init__(label="Edit Reward Defaults", style=discord.ButtonStyle.primary, row=1)
+        self.databaseManager = databaseManager
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await EnsureDashboardAccess(interaction, self.databaseManager):
+            return
+        db = self.databaseManager.ForServer(interaction.guild_id)
+        await interaction.response.send_modal(
+            InviteRewardDefaultsModal(
+                self.databaseManager,
+                db.GetSetting("invite_reward_credits", "50") or "50",
+                db.GetSetting("invite_duration_minutes", "60") or "60",
+            )
+        )
+
+
+class InviteRewardDefaultsModal(discord.ui.Modal, title="Invite Reward Defaults"):
+    rewardCredits = discord.ui.TextInput(
+        label="Credits per eligible invite", placeholder="50", min_length=1, max_length=10
+    )
+    durationMinutes = discord.ui.TextInput(
+        label="Default event duration in minutes", placeholder="60", min_length=1, max_length=5
+    )
+
+    def __init__(self, databaseManager: DatabaseManager, currentReward: str, currentDuration: str):
+        super().__init__(timeout=180)
+        self.databaseManager = databaseManager
+        self.rewardCredits.default = str(currentReward)
+        self.durationMinutes.default = str(currentDuration)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await EnsureDashboardAccess(interaction, self.databaseManager):
+            return
+        rewardText = str(self.rewardCredits.value).strip()
+        durationText = str(self.durationMinutes.value).strip()
+        if not rewardText.isdecimal() or int(rewardText) > MAX_CREDITS:
+            await SendEphemeralResponse(interaction, f"Reward credits must be a whole number from 0 to {MAX_CREDITS:,}.", ephemeral=True)
+            return
+        if not durationText.isdecimal() or not 1 <= int(durationText) <= 10_080:
+            await SendEphemeralResponse(interaction, "Duration must be between 1 and 10080 minutes (7 days).", ephemeral=True)
+            return
+        db = self.databaseManager.ForServer(interaction.guild_id)
+        db.SetSetting("invite_reward_credits", int(rewardText))
+        db.SetSetting("invite_duration_minutes", int(durationText))
+        await SendEphemeralResponse(
+            interaction,
+            "✅ Invite reward defaults saved. When rewards are enabled, staff can use /invite-event start to begin a timed event.",
+            ephemeral=True,
+        )
         await RefreshDashboardMessage(interaction.guild, db, self.databaseManager)
 
 
