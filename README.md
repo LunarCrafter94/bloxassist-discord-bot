@@ -1,6 +1,7 @@
 ![BloxAssist banner](assets/branding/bot-client_banner.png)
 
-# BloxAssist
+# BloxAssist Discord Bot
+### Helper & Credit System for Blox Fruits Players
 
 ![BloxAssist icon](assets/branding/bot-client_icon.png)
 
