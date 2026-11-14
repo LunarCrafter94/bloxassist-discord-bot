@@ -37,6 +37,49 @@ def FormatInviteEventCountdown(event: object, *, now: datetime | None = None) ->
     return f"<t:{unixTimestamp}:R>"
 
 
+def IsInviteEventInProgress(event: object, *, now: datetime | None = None) -> bool:
+    """Return whether an invite event has not reached its UTC end instant.
+
+    Datetime parsing avoids lexicographic comparisons between timestamps that may
+    use different ISO-8601 offsets. The year-9999 marker represents a manual-only
+    event and therefore remains in progress until explicitly ended.
+    """
+    try:
+        rawEnd = str(event["ends_at"])
+    except (KeyError, TypeError, IndexError):
+        return False
+    try:
+        endsAt = datetime.fromisoformat(rawEnd.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if endsAt.year >= 9999:
+        return True
+    if endsAt.tzinfo is None:
+        endsAt = endsAt.replace(tzinfo=timezone.utc)
+    else:
+        endsAt = endsAt.astimezone(timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    return endsAt > current
+
+
+def IsInviteLeavePenaltyEligible(attribution: object, scope: str = "all_invites") -> bool:
+    """Evaluate leave-penalty eligibility from the saved join-time provenance."""
+    if attribution is None:
+        return False
+    normalizedScope = str(scope or "all_invites").strip().lower()
+    if normalizedScope == "active_event_only":
+        try:
+            return attribution["invite_event_id"] is not None
+        except (KeyError, TypeError, IndexError):
+            return False
+    # Preserve legacy behavior for the default and any unrecognized setting.
+    return True
+
+
 async def FetchInviteUseCounts(guild: discord.Guild) -> dict[str, int] | None:
     """Return current invite uses. The bot needs Manage Server to inspect invites."""
     try:

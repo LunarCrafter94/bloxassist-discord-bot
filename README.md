@@ -1,6 +1,10 @@
 ![BloxAssist banner](assets/branding/bot-client_banner.png)
 
-# BloxAssist
+# BloxAssist Discord Bot: Helper & Credit System for Blox Fruits Players
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm_Noncommercial_1.0.0-brightgreen.svg)](LICENSE.md)
+[![Status: Beta](https://img.shields.io/badge/Status-Beta-yellow.svg)](#)
+[![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB.svg?logo=python&logoColor=white)](https://python.org)
+[![GitHub Release](https://img.shields.io/github/v/release/LunarCrafter94/bloxassist-discord-bot?include_prereleases&color=blue)](https://github.com/LunarCrafter94/bloxassist-discord-bot/releases)
 
 ![BloxAssist icon](assets/branding/bot-client_icon.png)
 
@@ -24,7 +28,7 @@ BloxAssist is a heavily AI-assisted project and can fairly be described as “vi
 - **v0.10.0:** `/balance` and `/credits` show outstanding debt; `/repay-debt` supports partial/full repayment with atomic balance/debt updates and an idempotent ledger record; future ticket and invite rewards automatically pay down debt first; `/credit-history`, `/ticket-history`, and `/reports` use consistent private Previous/Next pagination controls while retaining their `page` options for direct page jumps (ticket history also retains its configurable per-page limit); `/credits` and `/credit-history` accept numeric `user_id` lookups for former members (credit-history remains staff-restricted for other users); owner-only `/diagnostics` checks database tables and audit-channel permissions; `/reports` adds category filters and pagination. A global slash-command error handler gives users actionable private responses when option conversion fails.
 - Staff history and reporting: `/ticket-history` accepts a numeric `user_id` for former members; `/reports` can filter Open, Confirmed, Dismissed, or All while keeping the selected category/status across pages and showing saved reviewer notes for resolved cases.
 - Staff analytics: the Admin Dashboard's **Server Statistics** button opens a private snapshot of tracked accounts, available credits, outstanding debt, ticket/report counts, ledger records, enabled services, and invite rewards. `/member-activity` combines a member's account/debt totals with recent transactions and retained tickets; it accepts numeric IDs for former members and does not create missing accounts.
-- The server owner can configure the **Inviter Leave Penalty** in the Admin Dashboard, including whether the recorded inviter is penalized once per invited member or again for each distinct attributed rejoin/leave cycle. Repeat-per-rejoin is disabled by default for backward compatibility; `0` disables the penalty. Duplicate join/leave event handling is protected per join cycle.
+- The server owner can configure the **Inviter Leave Penalty** in the Admin Dashboard: its amount, whether it applies to all reliably attributed invites or only members who joined during an active Invite Reward Event, and whether the recorded inviter is penalized once per invited member or again for each distinct attributed rejoin/leave cycle. Eligibility is recorded at join time, so an event ending before the member leaves does not change that member's eligibility. Repeat-per-rejoin is disabled by default for backward compatibility; `0` disables the penalty. Duplicate join/leave event handling is protected per join cycle.
 - Ticket reservations, payouts, unused-slot refunds, refunds, invite rewards, and penalties have individual audit entries where implemented, with actor/reason/ledger details when available.
 - Completed/refunded tickets create text transcripts in the configured audit channel. If the transcript cannot be safely stored, the bot attempts to archive the original channel for moderator-only review rather than deleting the evidence.
 - Active ticket channel numbers are allocated separately and restart at `ticket-001` when no tickets remain open; active ticket channels are never assigned the same label. Permanent transcript identifiers never reset: `Ticket-001` through `Ticket-999`, then `Ticket-1│000`, `Ticket-1│001`, `Ticket-2│000`, and so on. At most **100 tracked transcript posts** remain in the configured audit channel. The database retains the **500 most recent closed tickets with confirmed transcripts**, plus open tickets and closed tickets that still need transcript recovery. Older eligible ticket rows and their per-ticket ledger rows are pruned; current balances, settings, services, and standalone credit-adjustment ledger entries are retained.
@@ -84,7 +88,7 @@ The bot needs to be able to DM the selected user. The ZIP is encrypted with WinZ
 ## License
 
 BloxAssist source code is licensed under the
-[PolyForm Noncommercial License 1.0.0](LICENSE).
+[PolyForm Noncommercial License 1.0.0](LICENSE.md).
 
 You may use, study, modify, and distribute this software
 for noncommercial purposes under the terms of the license.

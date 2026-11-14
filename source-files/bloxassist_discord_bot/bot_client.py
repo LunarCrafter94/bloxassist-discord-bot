@@ -18,7 +18,13 @@ from .admin.dashboard_views import (
 from .credits.credit_service import CreditService
 from .credits.credit_history_view import CreditHistoryView
 from .audit import ResolveAuditChannel, SendAuditLog
-from .invites.invite_events import FetchInviteUseCounts, FindUsedInvite, FormatInviteEventCountdown
+from .invites.invite_events import (
+    FetchInviteUseCounts,
+    FindUsedInvite,
+    FormatInviteEventCountdown,
+    IsInviteEventInProgress,
+    IsInviteLeavePenaltyEligible,
+)
 from .backups import PerServerBackupService
 from .interaction_utils import DeferEphemeralResponse, EditEphemeralOriginalResponse, SendEphemeralFollowup, SendEphemeralResponse
 from .pagination import EphemeralPaginator
@@ -348,8 +354,10 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 return
             if usedInvite is None or usedInvite.inviter is None or usedInvite.inviter.bot:
                 return
-            # Save attribution even outside an active reward event so leave penalties
-            # can only ever affect the inviter actually identified for this member.
+            # Capture the active event at join time. Leave-penalty eligibility can
+            # then distinguish members invited during an event from ordinary invites.
+            event = guildDatabase.GetActiveInviteEvent()
+            eventIsInProgress = IsInviteEventInProgress(event)
             repeatLeavePenalty = (
                 guildDatabase.GetSetting("invite_leave_penalty_repeat_on_rejoin", "false") or "false"
             ).lower() in {"true", "1", "yes", "on"}
@@ -360,8 +368,8 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
                 str(usedInvite.code),
                 repeatOnRejoin=repeatLeavePenalty,
                 joinedAt=joinedAt,
+                inviteEventId=int(event["event_id"]) if eventIsInProgress else None,
             )
-            event = guildDatabase.GetActiveInviteEvent()
             if event is None:
                 return
             previousDebt = guildDatabase.GetCreditDebt(usedInvite.inviter.id)
@@ -407,6 +415,11 @@ def CreateBot(settings: RuntimeSettings) -> discord.Client:
             if attribution is None:
                 # No reliable invite attribution means no penalty; never guess or deduct
                 # from unrelated members.
+                return
+            penaltyScope = (guildDatabase.GetSetting("invite_leave_penalty_scope", "all_invites") or "all_invites").strip().lower()
+            if not IsInviteLeavePenaltyEligible(attribution, penaltyScope):
+                # Eligibility is based on join-time event provenance, not whether an
+                # Invite Reward Event is still active when the member departs.
                 return
             inviterId = int(attribution["inviter_user_id"])
             if inviterId == int(member.id) or (self.user is not None and inviterId == self.user.id):
