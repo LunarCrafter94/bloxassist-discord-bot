@@ -1,10 +1,10 @@
 ![BloxAssist banner](assets/branding/bot-client_banner.png)
 
 # BloxAssist Discord Bot: Helper & Credit System for Blox Fruits Players
-[![License: PolyForm Noncommercial 1.0.0](https://shields.io)](LICENSE.md)
-[![Status: Beta](https://shields.io)](#)
-[![Python](https://shields.io)](https://python.org)
-[![GitHub Release](https://shields.io)](https://github.com)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm_Noncommercial_1.0.0-brightgreen.svg)](LICENSE.md)
+[![Status: Beta](https://img.shields.io/badge/Status-Beta-yellow.svg)](#)
+[![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB.svg?logo=python&logoColor=white)](https://python.org)
+[![GitHub Release](https://img.shields.io/github/v/release/LunarCrafter94/bloxassist-discord-bot?include_prereleases&color=blue)](https://://github.com)
 
 ![BloxAssist icon](assets/branding/bot-client_icon.png)
 
