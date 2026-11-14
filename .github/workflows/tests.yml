@@ -35,6 +35,34 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Build source and wheel distributions
+        run: |
+          python -m pip install build
+          python -m build --sdist --wheel
+
+      - name: Verify packaged license file
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tarfile
+          from zipfile import ZipFile
+
+          wheel = next(Path("dist").glob("*.whl"))
+          with ZipFile(wheel) as archive:
+              wheel_names = archive.namelist()
+          assert any(
+              name.endswith(".dist-info/licenses/LICENSE.md")
+              for name in wheel_names
+          ), "LICENSE.md is missing from wheel license metadata"
+
+          source_archive = next(Path("dist").glob("*.tar.gz"))
+          with tarfile.open(source_archive, "r:gz") as archive:
+              source_names = archive.getnames()
+          assert any(
+              name.endswith("/LICENSE.md") for name in source_names
+          ), "LICENSE.md is missing from the source distribution"
+          PY
+
       - name: Compile project
         run: python -m compileall -q RunBot.py source-files tests tools
 
