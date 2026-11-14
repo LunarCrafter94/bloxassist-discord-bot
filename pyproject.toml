@@ -9,7 +9,7 @@ description = "BloxAssist, a multi-server Discord bot for service tickets, credi
 readme = "README.md"
 requires-python = ">=3.13"
 license = "PolyForm-Noncommercial-1.0.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE.md"]
 dependencies = [
     "discord.py>=2.6,<3",
     "python-dotenv>=1.0,<2",
