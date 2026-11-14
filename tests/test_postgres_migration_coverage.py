@@ -81,6 +81,18 @@ class PostgresMigrationCoverageTests(unittest.TestCase):
         source = MIGRATION_SCRIPT.read_text(encoding="utf-8")
         self.assertIn('"invite_leave_penalty_repeat_on_rejoin": "false"', source)
 
+    def test_invite_attribution_schema_migrates_event_provenance(self):
+        source = (
+            ROOT / "source-files" / "bloxassist_discord_bot"
+            / "database" / "guild_database.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("invite_event_id INTEGER", source)
+        self.assertIn(
+            '"invite_event_id": "ALTER TABLE invite_attributions ADD COLUMN invite_event_id INTEGER"',
+            source,
+        )
+        self.assertIn('"invite_attributions"', read_module_constant("TABLES"))
+
     def test_postgres_backup_restore_covers_every_current_application_table(self):
         self.assertEqual(set(read_restore_constant("TABLES")), EXPECTED_TABLES)
 
