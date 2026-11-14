@@ -91,7 +91,7 @@ class PostgresMigrationCoverageTests(unittest.TestCase):
             '"invite_event_id": "ALTER TABLE invite_attributions ADD COLUMN invite_event_id INTEGER"',
             source,
         )
-        self.assertIn('"invite_attributions"', read_module_constant("TABLES"))
+        self.assertIn("invite_attributions", read_module_constant("TABLES"))
 
     def test_postgres_backup_restore_covers_every_current_application_table(self):
         self.assertEqual(set(read_restore_constant("TABLES")), EXPECTED_TABLES)
