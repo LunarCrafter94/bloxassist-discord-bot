@@ -1,6 +1,10 @@
 ![BloxAssist banner](assets/branding/bot-client_banner.png)
 
 # BloxAssist Discord Bot: Helper & Credit System for Blox Fruits Players
+[![License: PolyForm Noncommercial 1.0.0](https://shields.io)](LICENSE.md)
+[![Status: Beta](https://shields.io)](#)
+[![Python](https://shields.io)](https://python.org)
+[![GitHub Release](https://shields.io)](https://github.com)
 
 ![BloxAssist icon](assets/branding/bot-client_icon.png)
 
