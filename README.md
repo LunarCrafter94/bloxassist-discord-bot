@@ -84,7 +84,7 @@ The bot needs to be able to DM the selected user. The ZIP is encrypted with WinZ
 ## License
 
 BloxAssist source code is licensed under the
-[PolyForm Noncommercial License 1.0.0](LICENSE).
+[PolyForm Noncommercial License 1.0.0](LICENSE.md).
 
 You may use, study, modify, and distribute this software
 for noncommercial purposes under the terms of the license.
